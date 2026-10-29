@@ -21,7 +21,7 @@ jobs:
           log-accepted-android-sdk-licenses: false
       - uses: gradle/actions/setup-gradle@v4
       - name: Install Android SDK
-        run: sdkmanager 'platforms;android-37' 'build-tools;37.0.0'
+        run: sdkmanager 'platforms;android-37.0' 'build-tools;36.1.0'
       - name: Use fake build-only Firebase configuration
         run: cp app/google-services.example.json app/google-services.json
       - name: Build, unit tests and lint

@@ -1,0 +1,12 @@
+<resources>
+    <style name="Base.Theme.Chinlern" parent="Theme.Material3.Light.NoActionBar">
+        <item name="colorPrimary">#9F2936</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSecondary">#244B44</item>
+        <item name="colorSurface">#F9F6EE</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">#F9F6EE</item>
+    </style>
+    <style name="Theme.Chinlern" parent="Base.Theme.Chinlern" />
+</resources>

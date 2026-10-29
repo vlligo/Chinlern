@@ -1,0 +1,34 @@
+{
+  "name": "Еда и напитки",
+  "words": [
+    {
+      "hanzi": "咖啡",
+      "pinyin": "ka1 fei1",
+      "meanings": [
+        "кофе"
+      ]
+    },
+    {
+      "hanzi": "茶",
+      "pinyin": "cha2",
+      "meanings": [
+        "чай"
+      ]
+    },
+    {
+      "hanzi": "米饭",
+      "pinyin": "mi3 fan4",
+      "meanings": [
+        "рис",
+        "вареный рис"
+      ]
+    },
+    {
+      "hanzi": "水",
+      "pinyin": "shui3",
+      "meanings": [
+        "вода"
+      ]
+    }
+  ]
+}

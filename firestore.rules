@@ -1,0 +1,32 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function owner(userId) {
+      return request.auth != null && request.auth.uid == userId
+        && request.auth.token.email_verified == true;
+    }
+
+    match /users/{userId}/sync/state {
+      allow read: if owner(userId);
+      allow create, update: if owner(userId)
+        && request.resource.data.keys().hasOnly(['schema', 'chunks', 'revision'])
+        && request.resource.data.schema == 1
+        && request.resource.data.chunks is int
+        && request.resource.data.chunks >= 1
+        && request.resource.data.chunks <= 40
+        && request.resource.data.revision is string
+        && request.resource.data.revision.size() <= 100;
+      allow delete: if owner(userId);
+
+      match /chunks/{chunkId} {
+        allow read, delete: if owner(userId);
+        allow create, update: if owner(userId)
+          && chunkId.matches('[0-9]{1,2}')
+          && int(chunkId) < 40
+          && request.resource.data.keys().hasOnly(['data'])
+          && request.resource.data.data is bytes
+          && request.resource.data.data.size() <= 200000;
+      }
+    }
+  }
+}

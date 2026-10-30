@@ -388,6 +388,7 @@ class MainActivity : AppCompatActivity() {
         if (audio) {
             question.add(label("♪", 64f, jade).apply { gravity = Gravity.CENTER; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }, 14)
             question.add(button("▶  Послушать", true) { play(word) }, 8)
+            if (store.audioProvider == "hanping") question.add(button("Нет звука? Голос устройства") { useDeviceVoice(word) }, 8)
             question.add(label("Повторяйте запись столько раз, сколько нужно.", 13f, muted), 10)
             audioNotice = label(if (store.audioProvider == "hanping") "Звук воспроизводит Hanping" else voiceMessage ?: "Используется китайский голос устройства", 12f, muted)
             question.add(audioNotice!!, 8)
@@ -469,6 +470,7 @@ class MainActivity : AppCompatActivity() {
                 store.ignoreAnswer(); render()
             }, 10)
             response.twoButtons(button("▶  Произношение") { play(word) }, button("Словарь") { dictionary(word) })
+            if (store.audioProvider == "hanping") response.add(button("Нет звука? Голос устройства") { useDeviceVoice(word) }, 8)
             quizActions.add(button("Дальше", true) { voice.stop(); store.nextQuestion(); render() }, 6)
         }
         if (wideContent) {
@@ -1024,6 +1026,14 @@ class MainActivity : AppCompatActivity() {
             }
         }
         shown.show()
+    }
+    private fun useDeviceVoice(word: Word) {
+        voice.stop()
+        store.audioProvider = "system"
+        store.save()
+        render()
+        play(word)
+        toast("Выбран голос устройства. Вернуть Hanping можно в настройках.")
     }
     private fun play(word: Word) {
         val error = voice.play(word, store.audioProvider, store.slowAudio)

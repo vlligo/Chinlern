@@ -156,6 +156,8 @@ Request spacing did not eliminate the external Hanping service failure: device l
 
 The Hanping recovery dialog now offers a direct switch to the system voice with a 你好 test, alongside the temporary force-stop instructions. The sound test always speaks the displayed test word regardless of the current pack. Hardware volume keys control media volume while Chinlearn is open.
 
+Hanping playback expands erhua pinyin (for example, `zher4` → `zhe4 r5`) without changing the displayed pinyin or answers. On the connected phone, Hanping rejected `zher4` for 这儿 because its phonetic count did not match the two characters; `zhe4 r5` selected the `zhe4r5` recording. A separate audio-service stall delayed that recording by about 18 seconds. Listening questions and answer cards now offer **Нет звука? Голос устройства**, which cancels queued requests, saves the system voice preference, and speaks the current word. This is a manual recovery option: Chinlearn cannot detect silent external playback.
+
 ### Email verification, sync lock, and launcher icon
 
 The launcher uses red and gold, five stars, a book and a stylized Tiananmen gate. Adaptive, monochrome and legacy launcher resources are included; `app/icon-preview.png` previews the vector artwork.

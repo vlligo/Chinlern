@@ -101,6 +101,7 @@ class AccidentalAnswerTest {
 
     @Test fun ignoreButtonSurvivesRotationAndKeepsRevealedAnswerVisible() {
         val store = StudyStore(context)
+        store.introduce(store.words.first { it.id == "water" }) // These regressions exercise an already-previewed word.
         store.route = "quiz"; store.current = Task("water", Skill.CHARACTER_MEANING); store.save()
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             onView(withHint("Русский перевод")).perform(scrollTo(), replaceText("shui3"), closeSoftKeyboard())

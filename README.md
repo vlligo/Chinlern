@@ -58,7 +58,7 @@ JSON export contains vocabulary and accepted synonyms, not study results. Progre
 
 Open **Настройки → Аккаунт и синхронизация** to create an email/password account or sign in. Registration automatically sends a Firebase verification link in Russian. Follow the link and return to the app; verification is refreshed on return or with **Я подтвердил почту**. Failed email delivery leaves the created account usable locally, with a resend button and a one-minute resend cooldown. Existing unverified accounts must also verify before syncing. Use the same account on each device.
 
-Sync is **off by default**, including for existing signed-in installations upgrading to this version. After verification, choose **Включить синхронизацию** and enter the separate access password supplied by the app owner. It is distinct from the Firebase account password. Opt-in persists locally until disabled or the account changes; enabling again requires the password. The opt-in preference is excluded from Android cloud backup and device transfer, and is never in a sync snapshot. Disabling closes listeners and cancels scheduled retries; a server request already committed cannot be undone. Local study remains available without an account, verification, or sync.
+Sync starts off for accounts that have never unlocked it. The separate access password is required only for the first unlock. Access and the on/off preference are stored per account, survive updates/sign-out, and participate in Android backup/device transfer. Turning sync off does not revoke remembered access. Existing successful-sync history migrates automatically. After reinstalling, a verified account can recover access from its existing cloud sync manifest; **Проверить прежний доступ** retries that check after network failures. The app never needs the original shared password to resume a previously unlocked account. Disabling closes listeners and cancels scheduled retries; a server request already committed cannot be undone. Local study remains available without an account, verification, or sync.
 
 `SyncAccess.kt` reads a SHA-256 verifier from a generated build constant. The verifier is supplied through ignored local configuration and is not published in this repository. It is a local feature gate, not a server authorization secret against a modified app. Firestore authorization separately requires the account owner and a verified email token. The first account used on a device receives its existing local library. Additional accounts have separate local libraries; signing out retains each account's pending changes for its next sign-in. The original guest library remains available when signed out.
 
@@ -102,7 +102,7 @@ python3 tools/test_firebase_rules.py
 ```sh
 adb -s emulator-5554 shell am instrument -w \
   -e class com.example.chinlern.FirebaseSyncTest -e firebaseEmulators true \
-  com.example.chinlern.test/androidx.test.runner.AndroidJUnitRunner
+  com.example.chinlern.test/com.example.chinlern.SafeTestRunner
 ```
 
 If the emulator cannot reach the host through `10.0.2.2`, forward its ports with `adb -s emulator-5554 reverse tcp:9099 tcp:9099` and `adb -s emulator-5554 reverse tcp:8080 tcp:8080`, then add `-e firebaseHost 127.0.0.1` to the instrumentation command.
@@ -200,9 +200,30 @@ Quiz actions stay outside the scrolling question area, above the keyboard. Text 
 Use Android Studio with Android SDK 37 and the checked-in Gradle wrapper. The Gradle daemon configuration requests JDK 25.
 
 1. Create your own Firebase Android app for `com.example.chinlern` and download its `google-services.json` into `app/`. This file is ignored by Git. Enable Email/Password authentication and deploy the rules described above.
-2. For a local sync unlock, run `python3 tools/configure_sync.py`. It asks for your chosen password without echoing it and saves only its SHA-256 verifier in ignored `sync-access.properties`. An unset verifier leaves unlocking disabled; local study and file backups work normally. CI may supply `CHINLEARN_SYNC_PASSWORD_SHA256` instead.
+2. For a local sync unlock, run `python3 tools/configure_sync.py`. It asks for your chosen password without echoing it and saves only its SHA-256 verifier in ignored `sync-access.properties`. An unset verifier leaves first-time password unlocking disabled; previously unlocked accounts can still resume; local study and file backups work normally. CI may supply `CHINLEARN_SYNC_PASSWORD_SHA256` instead.
 3. Run `./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug`.
 
 The public CI uses a clearly fake Firebase configuration for compilation and unit tests; it never connects to the owner's Firebase project. Do not use that configuration for a distributed app.
 
 See [SECURITY.md](SECURITY.md) for the limits of the local unlock and publishing precautions.
+
+### Short sessions and first-time learning
+
+**Учить → 10 вопросов / 5 минут** starts a bounded session with a separate answer/correct/error summary. The five-minute limit uses elapsed wall-clock time (including time away from the app); the current answer can be finished and reviewed before advancing to results. Sessions can also be ended early. Reopening preserves the session, feedback, and counters. Undo and synonym correction update session totals as well as lifetime progress. Completing a short session does not reset the learning cycle. Changing packs or receiving changed practice data ends the local session.
+
+**Прогресс → Практиковать трудные слова** offers all difficult exercises, tones/pinyin, listening, meaning, or writing. The session uses up to 100 ranked exercises from the inspected pack, including mastered exercises with historical errors, without resetting mastery. The practice pack becomes the inspected pack; checked word selections remain unchanged.
+
+Previously unattempted words appear first as a preview with characters, marked/numbered pinyin, meanings, audio, and a hint. **Настройки → Новых слов в день** selects 0, 3, 5 (default), 10, or 20. Acknowledging a preview counts the word toward the local calendar-day limit across packs. Previously attempted words remain available without consuming that limit. Preview history, daily preferences, onboarding, and sessions are local to the profile/device, not included in cloud sync or manual vocabulary/progress backups.
+
+The first-session card checks Chinese playback, explains `shui3`, and starts ten beginner questions across up to three selected words. Users can start without listening exercises. The guide can be reopened in Settings. Pinyin feedback identifies affected syllables and distinguishes spelling from tone errors, including compact input (`ni3hao2`) and tone marks; tone-only questions show each incorrect tone. Existing translation synonym acceptance remains available.
+
+Validation: debug and test APKs build; 45 JVM tests pass; Android lint passes. Twenty focused emulator tests cover the new preview/session flow plus existing learning, accidental-answer undo, and fixed keyboard actions. The new-word preview was visually inspected at phone size.
+
+
+### Updates and account access
+
+Install updates with `adb -s DEVICE_SERIAL install -r app/build/outputs/apk/debug/app-debug.apk`. Keep the same application ID and signing key. If installation fails, stop and investigate; never uninstall or clear data as an automatic fallback. Release and debug builds can use different signing keys. Back up the library through Settings before switching build/signing variants.
+
+The test APK now registers `SafeTestRunner`, which rejects data-resetting instrumentation on physical devices before any tests run. Only the explicit read-only `PhoneSmokeTest` invocation is allowed there.
+
+Validation: build, 45 unit tests, and lint pass; 14 focused emulator tests cover account-specific access persistence, migration from successful sync, library state, and short sessions. An in-place phone update was verified to preserve every existing preference file byte-for-byte.

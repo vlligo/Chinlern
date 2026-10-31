@@ -33,6 +33,7 @@ class LearningFlowTest {
     }
     @Test fun typedAnswerFeedbackAndRotationRemainConsistent() {
         val store = StudyStore(context)
+        store.introduce(store.words.first { it.id == "water" }) // These regressions exercise an already-previewed word.
         store.route = "quiz"; store.current = Task("water", Skill.CHARACTER_MEANING); store.save()
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             onView(withHint("Русский перевод")).perform(replaceText("вода"), closeSoftKeyboard())
@@ -46,6 +47,7 @@ class LearningFlowTest {
     }
     @Test fun missingToneFails() {
         val store = StudyStore(context)
+        store.introduce(store.words.first { it.id == "water" }) // These regressions exercise an already-previewed word.
         store.route = "quiz"; store.current = Task("water", Skill.CHARACTER_PINYIN); store.save()
         ActivityScenario.launch(MainActivity::class.java).use {
             onView(withHint("Пиньинь с тонами")).perform(replaceText("shui"), closeSoftKeyboard())
@@ -56,6 +58,7 @@ class LearningFlowTest {
     }
     @Test fun writingRevealAndSelfAssessment() {
         val store = StudyStore(context)
+        store.introduce(store.words.first { it.id == "water" }) // These regressions exercise an already-previewed word.
         store.route = "quiz"; store.writing = true; store.current = Task("water", Skill.WRITING); store.save()
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             onView(withText("Показать ответ")).check(matches(isCompletelyDisplayed())).perform(click())
@@ -67,6 +70,7 @@ class LearningFlowTest {
     }
     @Test fun tonePromptDoesNotRevealThePronunciation() {
         val store = StudyStore(context)
+        store.introduce(store.words.first { it.id == "water" }) // These regressions exercise an already-previewed word.
         store.route = "quiz"; store.current = Task("water", Skill.CHARACTER_TONE); store.save()
         ActivityScenario.launch(MainActivity::class.java).use {
             onView(withText("shuǐ")).check(doesNotExist())
@@ -76,6 +80,7 @@ class LearningFlowTest {
     }
     @Test fun audioPromptKeepsMeaningAndHanziHidden() {
         val store = StudyStore(context)
+        store.introduce(store.words.first { it.id == "water" }) // These regressions exercise an already-previewed word.
         store.route = "quiz"; store.current = Task("water", Skill.AUDIO_MEANING); store.save()
         ActivityScenario.launch(MainActivity::class.java).use {
             onView(withText("вода")).check(doesNotExist())

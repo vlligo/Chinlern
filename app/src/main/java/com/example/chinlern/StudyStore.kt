@@ -5,7 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 class StudyStore(context: Context, userId: String? = null) {
-    val syncAccess = SyncAccess(context)
+    val syncAccess = SyncAccess(context, userId)
     private val prefs = profilePreferences(context, userId)
     private val packs = JSONObject(prefs.getString("packs", "{}")!!)
     var onSyncDataChanged: (() -> Unit)? = null
@@ -24,7 +24,11 @@ class StudyStore(context: Context, userId: String? = null) {
     private var mixedPrevious = parseTask(prefs.getString("mixedPrevious", null))
     val practicePackIds = (prefs.getStringSet("practicePacks", null) ?: setOf(activePackId)).toMutableSet()
     val studyEngine: LearningEngine get() = mixedStudy()?.engine ?: engine
-    val studyWords: List<Word> get() = mixedStudy()?.words ?: words.filter { it.id in selected }
+    val studyWords: List<Word> get() {
+        mixedStudy()?.let { return it.words }
+        val focus = if (shortSession) session.optJSONArray("tasks")?.strings()?.mapNotNull { parseTask(it)?.wordId }?.toSet() else null
+        return words.filter { if (focus == null) it.id in selected else it.id in focus }
+    }
     val practiceLabel: String get() = packNames.filter { it.first in practicePackIds }.joinToString(", ") { it.second }
     val engine = LearningEngine()
     var words: MutableList<Word> = mutableListOf()
@@ -47,8 +51,45 @@ class StudyStore(context: Context, userId: String? = null) {
     private var answerUndo: JSONObject? = null
     val canIgnoreAnswer: Boolean get() = feedback != null && !answerIgnored && answerUndo != null
     var strokes = ""
+    var onboardingDone = prefs.getBoolean("onboardingDone", false)
+    var dailyNewWords = prefs.getInt("dailyNewWords", 5)
+    private val introductions = JSONObject(prefs.getString("introductions", "{}")!!)
+    var session = JSONObject(prefs.getString("shortSession", "{}")!!)
+        private set
+    val shortSession get() = session.optBoolean("active")
+    val sessionCount get() = session.optInt("count")
+    val sessionCorrect get() = session.optInt("correct")
+    val sessionFinished get() = shortSession && (session.optBoolean("finished") ||
+        (session.optInt("limit") > 0 && sessionCount >= session.optInt("limit")) ||
+        (session.optLong("until") > 0 && System.currentTimeMillis() >= session.optLong("until")))
+    private fun today() = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).format(java.util.Date())
+    private fun introductionKey(word: Word): String {
+        val origin = mixedStudy()?.origins?.get(word.id)
+        return "${origin?.packId ?: activePackId}/${origin?.wordId ?: word.id}"
+    }
+    fun needsPreview(word: Word) = !introductions.has(introductionKey(word)) &&
+        Skill.entries.none { (studyEngine.progress[Task(word.id, it).key]?.attempts ?: 0) > 0 }
+    fun introduce(word: Word) { introductions.put(introductionKey(word), today()); save() }
+    private fun eligibleWords(): List<Word> {
+        val used = introductions.keys().asSequence().count { introductions.optString(it) == today() }
+        val words = studyWords
+        val fresh = words.filter { needsPreview(it) }.take((dailyNewWords - used).coerceAtLeast(0)).map { it.id }.toSet()
+        return words.filter { !needsPreview(it) || it.id in fresh }
+    }
+    fun beginSession(minutes: Boolean = false, focus: List<Task>? = null) {
+        clearQuestion()
+        session = JSONObject().put("active", true).put("limit", if (minutes) 0 else 10)
+            .put("until", if (minutes) System.currentTimeMillis() + 300_000L else 0L)
+            .put("count", 0).put("correct", 0)
+        focus?.let { session.put("tasks", JSONArray(it.map { task -> task.key })) }
+        save()
+    }
+    fun endSession() { session.put("finished", true); clearQuestion(); save() }
+    fun leaveSession() { session = JSONObject(); clearQuestion(); save() }
+
 
     init {
+        if (userId != null && lastSyncedAt > 0) syncAccess.rememberPreviousAccess()
         if (!packs.has(activePackId)) packs.put(activePackId, JSONObject().put("name", "Мои слова"))
         words = try { decodeWords(prefs.getString("words", null) ?: seedJson).toMutableList() }
         catch (_: Exception) { decodeWords(seedJson).toMutableList() }
@@ -105,7 +146,7 @@ class StudyStore(context: Context, userId: String? = null) {
     }
     fun choosePracticePacks(ids: Set<String>) {
         require(ids.isNotEmpty() && ids.all { packs.has(it) }) { "Выберите хотя бы один набор." }
-        save(); mixed = null; mixedPrevious = null; practicePackIds.clear(); practicePackIds.addAll(ids)
+        save(); session = JSONObject(); mixed = null; mixedPrevious = null; practicePackIds.clear(); practicePackIds.addAll(ids)
         clearQuestion(); save()
     }
     data class LibraryPack(val id: String, val name: String, val words: List<Word>, val selected: Set<String>)
@@ -158,7 +199,7 @@ class StudyStore(context: Context, userId: String? = null) {
         mixed = null; route = previousRoute; save()
     }
 
-    fun invalidatePractice() { flushMixed(); mixed = null; mixedPrevious = null; clearQuestion() }
+    fun invalidatePractice() { session = JSONObject(); flushMixed(); mixed = null; mixedPrevious = null; clearQuestion() }
     fun addStudySynonym(word: Word, meaning: String) {
         val updated = word.copy(meanings = (word.meanings + meaning).distinct())
         val session = mixed
@@ -187,12 +228,13 @@ class StudyStore(context: Context, userId: String? = null) {
         (if (session == null) setOf(activePackId) else practicePackIds).forEach {
             steps.put(it, packs.getJSONObject(it).getInt("step"))
         }
-        answerUndo = JSONObject().put("pack", packId).put("key", key)
+        answerUndo = JSONObject().put("sessionCount", sessionCount).put("sessionCorrect", sessionCorrect).put("pack", packId).put("key", key)
             .put("progress", savedProgress.optJSONObject(key)?.let { JSONObject(it.toString()) } ?: JSONObject.NULL)
             .put("steps", steps).put("previous", studyEngine.previous?.key ?: JSONObject.NULL)
             .put("activePrevious", engine.previous?.key ?: JSONObject.NULL)
         beforeAnswer = studyEngine.state(task).copy()
         studyEngine.answer(task, correct)
+        if (shortSession) this.session.put("count", sessionCount + 1).put("correct", sessionCorrect + if (correct) 1 else 0)
         feedback = correct; answerIgnored = false
         save()
     }
@@ -216,6 +258,7 @@ class StudyStore(context: Context, userId: String? = null) {
         engine.step = active.getInt("step")
         engine.previous = if (undo.isNull("activePrevious")) null else parseTask(undo.getString("activePrevious"))
         mixedPrevious = if (undo.isNull("previous")) null else parseTask(undo.getString("previous"))
+        if (shortSession) session.put("count", undo.optInt("sessionCount")).put("correct", undo.optInt("sessionCorrect"))
         answerIgnored = true; answerUndo = null; beforeAnswer = null
         save()
         // Keep the revealed answer visible, but it can no longer be scored a second time.
@@ -229,11 +272,23 @@ class StudyStore(context: Context, userId: String? = null) {
         return true
     }
 
-    fun tasks() = studyEngine.tasks(studyWords, writing, audioEnabled)
+    fun tasks(): List<Task> {
+        // Generate against the whole selection first to retain ambiguity exclusions.
+        val eligible = eligibleWords().map { it.id }.toSet()
+        val focus = session.optJSONArray("tasks")?.strings()?.toSet()
+        val available = if (shortSession && focus != null)
+            studyEngine.tasks(studyWords, false, audioEnabled) + studyEngine.tasks(studyWords, true, false)
+        else studyEngine.tasks(studyWords, writing, audioEnabled)
+        return available.filter {
+            it.wordId in eligible && (!shortSession || focus == null || it.key in focus)
+        }
+    }
     fun clearQuestion() { current = null; feedback = null; revealed = false; draft = ""; toneDraft.clear(); choices = emptyList(); beforeAnswer = null; answerUndo = null; answerIgnored = false; strokes = "" }
     fun nextQuestion() {
         clearQuestion()
-        current = studyEngine.next(tasks())
+        if (sessionFinished) { save(); return }
+        val available = tasks()
+        current = studyEngine.next(available) ?: if (shortSession) available.filter { it != studyEngine.previous }.ifEmpty { available }.randomOrNull() else null
         current?.let { task -> choices = studyEngine.options(studyWords.first { it.id == task.wordId }) }
         save()
     }
@@ -244,7 +299,8 @@ class StudyStore(context: Context, userId: String? = null) {
         engine.progress.filterValues { it != Progress() }.forEach { (key, p) -> progressJson.put(key, writeProgress(p)) }
         packs.put(activePackId, JSONObject().put("name", packName).put("words", encodeWords(words))
             .put("selected", JSONArray(selected.toList())).put("progress", progressJson).put("step", engine.step))
-        prefs.edit().putStringSet("practicePacks", practicePackIds.toSet()).putString("packs", packs.toString()).putString("activePack", activePackId).putString("words", encodeWords(words)).putStringSet("selected", selected.toSet())
+        prefs.edit().putString("shortSession", session.toString()).putString("introductions", introductions.toString())
+            .putBoolean("onboardingDone", onboardingDone).putInt("dailyNewWords", dailyNewWords).putStringSet("practicePacks", practicePackIds.toSet()).putString("packs", packs.toString()).putString("activePack", activePackId).putString("words", encodeWords(words)).putStringSet("selected", selected.toSet())
             .putString("progress", progressJson.toString()).putInt("step", engine.step)
             .putString("previous", engine.previous?.key).putString("mixedPrevious", mixedPrevious?.key).putBoolean("audio", audioEnabled)
             .putBoolean("speakAfterAnswer", speakAfterAnswer).putString("provider", audioProvider).putBoolean("slow", slowAudio).putBoolean("writing", writing)
@@ -289,7 +345,7 @@ class StudyStore(context: Context, userId: String? = null) {
         }
         practicePackIds.retainAll(merged.packs.keys)
         if (practicePackIds.isEmpty()) practicePackIds.add(activePackId)
-        if (mixedChanged) { mixedPrevious = null; clearQuestion(); if (route == "quiz") route = "learn" }
+        if (mixedChanged) { session = JSONObject(); mixedPrevious = null; clearQuestion(); if (route == "quiz") route = "learn" }
         syncBase = cloud.toMap(); syncRevision = revision; lastSyncedAt = System.currentTimeMillis()
         save()
         return merged.conflicts
@@ -298,7 +354,7 @@ class StudyStore(context: Context, userId: String? = null) {
         require(packs.has(id)) { "Набор не найден." }
         if (id == activePackId) return
         save()
-        mixed = null; mixedPrevious = null
+        session = JSONObject(); mixed = null; mixedPrevious = null
         if (practicePackIds.size == 1) { practicePackIds.clear(); practicePackIds.add(id) }
         val pack = packs.getJSONObject(id)
         val incoming = decodeWords(pack.getString("words"))
@@ -353,7 +409,7 @@ class StudyStore(context: Context, userId: String? = null) {
             if (selection != practicePackIds) choosePracticePacks(selection)
             return merged
         }
-        mixed = null; mixedPrevious = null
+        session = JSONObject(); mixed = null; mixedPrevious = null
         packs.keys().asSequence().toList().forEach { packs.remove(it) }
         merged.packs.forEach { (id, text) -> packs.put(id, JSONObject(text)) }
         val active = packs.getJSONObject(activePackId)

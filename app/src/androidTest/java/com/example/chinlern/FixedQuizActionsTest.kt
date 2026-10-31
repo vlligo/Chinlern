@@ -21,6 +21,7 @@ class FixedQuizActionsTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit()
         val store = StudyStore(context)
+        store.introduce(store.words.first { it.id == "water" }) // These regressions exercise an already-previewed word.
         store.route = "quiz"; store.current = Task("water", Skill.CHARACTER_MEANING); store.save()
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             onView(withHint("Русский перевод")).perform(click(), typeText("shui3"))

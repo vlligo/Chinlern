@@ -44,6 +44,7 @@ class MainActivity : AppCompatActivity() {
     private var verificationMessage: String? = null
     private var verificationBusy = false
     private var lastVerificationSentAt = 0L
+    private var accessRestoreUid: String? = null
     private var syncStatus = "Синхронизация выключена"
     private var syncStatusLabel: TextView? = null
     private lateinit var content: LinearLayout
@@ -147,7 +148,7 @@ class MainActivity : AppCompatActivity() {
             if (nextUid != profileUid) {
                 cloud?.close(); cloud = null
                 store.save()
-                store.syncAccess.disable()
+                accessRestoreUid = null
                 verificationMessage = null
                 lastVerificationSentAt = 0L
                 profileUid = nextUid
@@ -178,6 +179,27 @@ class MainActivity : AppCompatActivity() {
             profileUid == null -> "Войдите, чтобы синхронизировать наборы и прогресс"
             auth.currentUser?.isEmailVerified != true -> "Подтвердите почту, чтобы начать синхронизацию"
             else -> "Ожидание синхронизации…"
+        }
+        if (!store.syncAccess.hasAccess && profileUid != null && auth.currentUser?.isEmailVerified == true && accessRestoreUid != profileUid) {
+            val uid = profileUid!!
+            val targetStore = store
+            accessRestoreUid = uid
+            syncStatus = "Проверяем прежний доступ к синхронизации…"
+            com.google.firebase.firestore.FirebaseFirestore.getInstance().collection("users").document(uid)
+                .collection("sync").document("state").get(com.google.firebase.firestore.Source.SERVER)
+                .addOnSuccessListener { snapshot ->
+                    if (store !== targetStore || profileUid != uid || auth.currentUser?.isEmailVerified != true) return@addOnSuccessListener
+                    if (snapshot.exists() && snapshot.getLong("schema") == SyncSnapshot.VERSION.toLong()) {
+                        store.syncAccess.rememberPreviousAccess()
+                    }
+                    connectCloud()
+                    if (store.route == "settings") render()
+                }.addOnFailureListener {
+                    if (store !== targetStore || profileUid != uid) return@addOnFailureListener
+                    accessRestoreUid = null
+                    syncStatus = "Не удалось проверить прежний доступ. Подключитесь к сети и повторите проверку."
+                    syncStatusLabel?.text = syncStatus
+                }
         }
         if (!store.syncAccess.enabled || auth.currentUser?.isEmailVerified != true) return
         profileUid?.let { uid -> cloud = CloudSync(store, uid, { status ->
@@ -307,6 +329,15 @@ class MainActivity : AppCompatActivity() {
     }
     private fun dashboard() {
         heading("Практика", "Выберите наборы и начните занятие.")
+        if (!store.onboardingDone) {
+            val welcome = card()
+            welcome.add(label("Первое занятие", 22f, jade, true))
+            welcome.add(label("Проверьте китайский звук. Пиньинь можно вводить цифрами: shui3 = shuǐ, вода. Сначала познакомимся со словами, затем ответим на 10 вопросов.", 16f), 8)
+            welcome.add(button("▶ Проверить звук: 你好") { play(Word("test", "你好", "nǐ hǎo", "ni3 hao3", listOf("привет"), emptyList())) }, 8)
+            welcome.add(button("Звук слышен — начать", true) { store.audioEnabled = true; store.onboardingDone = true; startBeginner() }, 8)
+            welcome.add(button("Пока без заданий на слух") { store.audioEnabled = false; store.onboardingDone = true; startBeginner() }, 8)
+            content.add(welcome, 16)
+        }
         val packControls = if (wideContent) card() else content
         practicePicker(packControls)
         packControls.add(button("＋ Новый набор") { importHub() }, 10)
@@ -330,6 +361,12 @@ class MainActivity : AppCompatActivity() {
             overview.addView(hero, LinearLayout.LayoutParams(0, -2, 1f))
             content.add(overview, 20)
         } else content.add(hero, 24)
+        val short = card()
+        short.add(label("Короткое занятие", 21f, ink, true))
+        short.add(label("${store.dailyNewWords} новых слов в день. Результат — после занятия; прогресс цикла сохраняется.", 15f, muted), 8)
+        short.twoButtons(button("10 вопросов", true) { startShort(false) }, button("5 минут") { startShort(true) })
+        if (store.shortSession) short.add(button("Продолжить короткое занятие") { store.route = "quiz"; render() }, 8)
+        content.add(short, 16)
         val learn = card()
         learn.add(label("Значение и произношение", 21f, ink, true))
         learn.add(label("Перевод, пиньинь и тоны. ${if (store.audioEnabled) "Задания на слух включены." else "Задания на слух выключены."}", 15f, muted), 8)
@@ -350,7 +387,34 @@ class MainActivity : AppCompatActivity() {
         setIndicatorColor(gold); trackColor = Color.rgb(226, 224, 207); trackThickness = dp(7); trackCornerRadius = dp(4)
         contentDescription = "Закреплено $progress из ${tasks.size} навыков"
     }
+    private fun startBeginner() {
+        val beginnerWords = store.studyWords.take(3)
+        val focus = store.studyEngine.tasks(beginnerWords, false, false).filter {
+            it.skill in setOf(Skill.CHARACTER_MEANING, Skill.CHARACTER_PINYIN, Skill.CHARACTER_TONE)
+        }
+        startShort(false, focus)
+    }
+    private fun startShort(minutes: Boolean, focus: List<Task>? = null, writing: Boolean = false) {
+        if (store.studyWords.isEmpty()) { toast("Выберите хотя бы одно слово"); return }
+        store.writing = writing
+        store.beginSession(minutes, focus)
+        store.route = "quiz"; store.nextQuestion(); render()
+    }
+    private fun shortResults() {
+        heading("Занятие завершено", "Можно остановиться здесь. Прогресс сохранён.")
+        val box = card()
+        box.add(label("Ответов: ${store.sessionCount}", 28f, jade, true))
+        box.add(label("Верно: ${store.sessionCorrect} · Ошибок: ${store.sessionCount - store.sessionCorrect}", 20f), 12)
+        content.add(box, 20)
+        content.add(button("Ещё 10 вопросов", true) {
+            val focus = store.session.optJSONArray("tasks")?.let { json -> (0 until json.length()).map { json.getString(it) }.toSet() }
+            startShort(false, focus?.let { keys -> store.tasks().filter { it.key in keys } }, store.writing)
+        }, 12)
+        content.add(button("Трудные слова") { store.leaveSession(); store.route = "stats"; render() }, 8)
+        content.add(button("К обзору") { store.leaveSession(); store.route = "learn"; render() }, 8)
+    }
     private fun start(writing: Boolean) {
+        if (store.shortSession) store.leaveSession()
         if (store.studyWords.isEmpty()) { toast("Выберите хотя бы одно слово"); store.route = "words"; render(); return }
         if (store.writing != writing) { store.writing = writing; store.clearQuestion() }
         store.route = "quiz"
@@ -358,16 +422,38 @@ class MainActivity : AppCompatActivity() {
         render()
     }
     private fun quiz() {
+        if (store.sessionFinished && store.feedback == null) { shortResults(); return }
         val tasks = store.tasks()
-        if (tasks.isEmpty()) { heading("Выберите слова", "Добавьте слова в практику на вкладке «Слова»."); return }
+        if (tasks.isEmpty()) {
+            heading("На сегодня всё", "Нет доступных заданий. Выберите слова или измените дневной лимит новых слов в настройках.")
+            if (store.shortSession) content.add(button("Результаты занятия") { store.endSession(); render() }, 12)
+            content.add(button("К обзору") { store.route = "learn"; render() }, 12)
+            return
+        }
         if (store.current == null) store.nextQuestion()
         val task = store.current
         if (task == null) { results(tasks); return }
         quizActions.visibility = View.VISIBLE
         val word = store.studyWords.first { it.id == task.wordId }
+        if (store.needsPreview(word) && store.feedback == null) {
+            heading("Новое слово", "Познакомьтесь со словом перед первым вопросом.")
+            val preview = card()
+            preview.add(label(word.writtenForms.joinToString(" / "), 48f, jade, true))
+            preview.add(label("${word.pinyin} · ${word.numbered}", 24f), 12)
+            preview.add(label(word.meanings.joinToString(" / "), 20f), 12)
+            preview.add(label(word.hint.ifBlank { "Произнесите слово и свяжите его написание со значением." }, 16f, muted), 12)
+            preview.add(button("▶ Произношение") { play(word) }, 12)
+            content.add(preview, 16)
+            quizActions.add(button("Запомнил — к вопросам", true) { store.introduce(word); render() }, 8)
+            return
+        }
+        if (store.shortSession) {
+            content.add(label(if (store.session.optInt("limit") > 0) "Занятие: ${store.sessionCount} / 10 ответов" else "Занятие: 5 минут · ${store.sessionCount} ответов. Завершится после текущего вопроса.", 16f, jade, true), 8)
+            content.add(button("Завершить занятие") { store.endSession(); render() }, 8)
+        }
         val mastery = tasks.count { store.studyEngine.state(it).mastered }
         val top = row()
-        top.addView(label(if (store.writing) "НАПИСАНИЕ" else "ЗНАНИЕ", 12f, jade, true), LinearLayout.LayoutParams(0, -2, 1f))
+        top.addView(label(if (task.skill == Skill.WRITING) "НАПИСАНИЕ" else "ЗНАНИЕ", 12f, jade, true), LinearLayout.LayoutParams(0, -2, 1f))
         top.addView(label("$mastery / ${tasks.size}", 14f, muted))
         content.add(top, 6); content.add(progress(tasks), 12)
         content.add(label("Ошибок: ${tasks.sumOf { store.studyEngine.state(it).errors }} · ${task.skill.title}", 13f, muted), 12)
@@ -456,6 +542,17 @@ class MainActivity : AppCompatActivity() {
             result.add(label(if (store.answerIgnored) "Ответ не учтён" else if (correct) "✓  Верно" else "Неверно", 22f, if (store.answerIgnored) ink else if (correct) jade else red, true))
             if (store.draft.isNotBlank()) result.add(label("Ваш ответ: ${store.draft}", 14f, muted), 8)
             if (store.toneDraft.isNotEmpty()) result.add(label("Ваши тоны: ${store.toneDraft.joinToString(" → ")}", 14f, muted), 8)
+            if (!correct && !store.answerIgnored) {
+                if (task.skill in listOf(Skill.CHARACTER_PINYIN, Skill.MEANING_PINYIN)) {
+                    Answers.pinyinFeedback(store.draft, word.numbered).forEach { result.add(label(it, 18f, red, true), 8) }
+                }
+                if (task.skill == Skill.CHARACTER_TONE && store.toneDraft.isNotEmpty()) {
+                    Answers.tones(word).forEachIndexed { index, tone ->
+                        val given = store.toneDraft.getOrNull(index)
+                        if (given != tone) result.add(label("Слог ${index + 1}: ${given ?: "—"} → $tone", 18f, red, true), 8)
+                    }
+                }
+            }
             result.add(label(word.writtenForms.joinToString(" / "), 48f, jade), 12)
             result.add(label("${word.pinyin}  ·  ${Answers.tones(word).joinToString(" + ")}", 20f, ink, true), 4)
             result.add(label(word.meanings.joinToString(" / "), 18f), 8)
@@ -499,7 +596,7 @@ class MainActivity : AppCompatActivity() {
             }.setNegativeButton("Отмена", null).show()
     }
     private fun results(tasks: List<Task>) {
-        heading("Цикл завершён", if (store.writing) "Вы воспроизвели написание всех выбранных слов." else "Все доступные направления для выбранных слов закреплены.")
+        heading("Цикл завершён", if (store.writing) "Вы воспроизвели написание всех выбранных слов." else "Все доступные сегодня направления закреплены. Новые слова ограничены дневным лимитом.")
         val box = card(jade)
         box.add(label("${tasks.size} / ${tasks.size}", 48f, Color.WHITE, true))
         box.add(label("${if (store.writing) "слов" else "навыков"} закреплено", 18f, Color.WHITE), 8)
@@ -706,6 +803,23 @@ class MainActivity : AppCompatActivity() {
         content.add(label("Что сложнее запомнить", 22f, ink, true), 24)
         content.add(label("Сначала — незакреплённые задания. Чем чаще ошибки и короче серия верных ответов, тем выше задание в списке.", 13f, muted), 8)
         val problematic = RecallDifficulty.rank(all + writing, store.engine.progress)
+        if (problematic.isNotEmpty()) content.add(button("Практиковать трудные слова", true) {
+            val groups = listOf("Все трудные задания", "Тоны", "Аудирование", "Значение", "Написание")
+            MaterialAlertDialogBuilder(this).setTitle("Что практиковать?").setItems(groups.toTypedArray()) { _, index ->
+                val skills = when (index) {
+                    1 -> setOf(Skill.CHARACTER_TONE, Skill.CHARACTER_PINYIN, Skill.MEANING_PINYIN)
+                    2 -> setOf(Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER)
+                    3 -> setOf(Skill.CHARACTER_MEANING, Skill.PINYIN_MEANING)
+                    4 -> setOf(Skill.WRITING)
+                    else -> Skill.entries.toSet()
+                }
+                val focus = problematic.filter { it.skill in skills }.take(100)
+                if (focus.isEmpty()) toast("В этой группе нет трудных заданий") else {
+                    store.choosePracticePacks(setOf(store.activePackId))
+                    startShort(false, focus, index == 4)
+                }
+            }.setNegativeButton("Отмена", null).show()
+        }, 12)
         if (problematic.isEmpty()) content.add(label("Заданий с ошибками пока нет.", 15f, muted), 12)
         if (problematic.size > 100) content.add(label("Показаны 100 самых сложных заданий.", 13f, muted), 10)
         val difficultCards = problematic.take(100).map { task ->
@@ -722,6 +836,14 @@ class MainActivity : AppCompatActivity() {
     }
     private fun settings() {
         heading("Настройки")
+        content.add(button("Новых слов в день: ${store.dailyNewWords}") {
+            val limits = listOf(0, 3, 5, 10, 20)
+            MaterialAlertDialogBuilder(this).setTitle("Сколько новых слов вводить в день?")
+                .setSingleChoiceItems(limits.map { if (it == 0) "0 — только знакомые слова" else "$it слов" }.toTypedArray(), limits.indexOf(store.dailyNewWords)) { dialog, which ->
+                    store.dailyNewWords = limits[which]; store.save(); dialog.dismiss(); render()
+                }.setNegativeButton("Отмена", null).show()
+        }, 12)
+        content.add(button("Как начать: звук и пиньинь") { store.onboardingDone = false; store.route = "learn"; render() }, 8)
         val accountColumn = if (wideContent) column() else content
         val optionsColumn = if (wideContent) column() else content
         if (wideContent) {
@@ -735,7 +857,7 @@ class MainActivity : AppCompatActivity() {
         account.add(label(auth.currentUser?.email ?: "Без аккаунта", 16f, jade), 12)
         syncStatusLabel = label(syncStatus, 14f, muted)
         account.add(syncStatusLabel!!, 8)
-        account.add(label("Синхронизация между устройствами выключена по умолчанию. Для включения нужны подтверждённая почта и отдельный пароль доступа на каждом устройстве.", 14f, muted), 10)
+        account.add(label("Доступ запоминается для аккаунта. После обновления или повторного входа пароль доступа больше не нужен. При первом включении подтвердите почту и введите пароль доступа.", 14f, muted), 10)
         if (profileUid == null) {
             account.add(label("Ваши локальные наборы и результаты присоединятся к первому аккаунту на этом устройстве.", 14f, muted), 10)
             account.add(button("Войти / создать аккаунт", true) { accountDialog() }, 14)
@@ -755,10 +877,11 @@ class MainActivity : AppCompatActivity() {
                 }, 8)
             } else {
                 account.add(button("Включить синхронизацию") { unlockSync() }.apply { isEnabled = verified }, 14)
+                if (!store.syncAccess.hasAccess) account.add(button("Проверить прежний доступ") { accessRestoreUid = null; connectCloud(); render() }.apply { isEnabled = verified }, 8)
             }
             account.add(button("Выйти из аккаунта") {
                 MaterialAlertDialogBuilder(this).setTitle("Выйти из аккаунта?")
-                    .setMessage("Копия данных останется на устройстве. После следующего входа синхронизацию нужно включить снова, введя пароль доступа.")
+                    .setMessage("Наборы и прогресс останутся на устройстве. Доступ к синхронизации сохранится для этого аккаунта; повторно вводить пароль доступа не потребуется.")
                     .setPositiveButton("Выйти") { _, _ -> auth.signOut() }.setNegativeButton("Отмена", null).show()
             }, 8)
         }
@@ -907,6 +1030,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun unlockSync() {
         if (auth.currentUser?.isEmailVerified != true) return
+        if (store.syncAccess.resume()) { connectCloud(); render(); return }
         val uid = profileUid
         val box = column().apply { setPadding(dp(24), dp(8), dp(24), dp(8)) }
         box.add(label("Введите отдельный пароль доступа к синхронизации. Он отличается от пароля аккаунта.", 14f, muted))
@@ -919,7 +1043,9 @@ class MainActivity : AppCompatActivity() {
             .setView(box).setPositiveButton("Включить", null).setNegativeButton("Отмена", null).create()
         dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             if (uid != profileUid || auth.currentUser?.isEmailVerified != true) { dialog.dismiss(); return@setOnClickListener }
-            if (!store.syncAccess.enable(password.text.toString())) password.error = "Неверный пароль доступа"
+            if (!store.syncAccess.enable(password.text.toString())) password.error =
+                if (BuildConfig.SYNC_PASSWORD_SHA256.isBlank()) "В этой сборке не настроен первый доступ к синхронизации"
+                else "Пароль доступа не подходит к этой сборке. Если вы уже синхронизировались, повторите проверку прежнего доступа."
             else { password.text?.clear(); dialog.dismiss(); connectCloud(); render() }
         } }
         dialog.show()

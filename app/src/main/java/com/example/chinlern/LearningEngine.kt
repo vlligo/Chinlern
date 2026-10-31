@@ -41,6 +41,40 @@ object Answers {
     fun pronunciationKey(word: Word) = word.numbered.lowercase(Locale.ROOT)
         .replace("u:", "ü").replace('v', 'ü').replace(Regex("\\s+"), "")
 
+    /** Explain each mismatch without relaxing the answer validator. */
+    fun pinyinFeedback(input: String, expected: String): List<String> {
+        if (input.isBlank() || pinyinMatches(input, expected)) return emptyList()
+        fun base(text: String) = Normalizer.normalize(text.lowercase(Locale.ROOT)
+            .replace("u:", "ü").replace('v', 'ü'), Normalizer.Form.NFD)
+            .replace(Regex("[\\u0300\\u0301\\u0304\\u030c1-5\\s'’·-]"), "")
+        val targets = Regex("[a-züv:]+[1-5]").findAll(expected.lowercase(Locale.ROOT)).map { it.value }.toList()
+        if (base(input) != base(expected)) {
+            val given = input.trim().split(Regex("[\\s'’·-]+"))
+            if (given.size == targets.size) return targets.indices.mapNotNull { i ->
+                when {
+                    base(given[i]) != base(targets[i]) -> "Слог ${i + 1}: ${given[i]} → ${targets[i]} — неверный слог"
+                    !pinyinMatches(given[i], targets[i]) -> "Тон ${i + 1}: ${given[i]} → ${targets[i]}"
+                    else -> null
+                }
+            }
+            return listOf("Неверные слоги: $input → $expected")
+        }
+        // Expected spelling supplies boundaries even for compact input such as ni3hao2.
+        val compact = Normalizer.normalize(input.lowercase(Locale.ROOT).replace("u:", "ü").replace('v', 'ü'), Normalizer.Form.NFC)
+            .replace(Regex("[\\s'’·-]"), "")
+        var cursor = 0
+        val differences = targets.mapIndexedNotNull { index, target ->
+            val start = cursor
+            repeat(target.dropLast(1).replace("u:", "ü").length) { if (cursor < compact.length) cursor++ }
+            if (cursor < compact.length && compact[cursor] in '1'..'5') cursor++
+            val given = compact.substring(start, cursor)
+            if (pinyinMatches(given, target)) null else "Тон ${index + 1}: $given → $target (нужен ${target.last()}-й тон)"
+        }
+        return if (cursor != compact.length || differences.isEmpty())
+            differences + "Проверьте запись тонов: $input → $expected (один тон на слог)"
+        else differences
+    }
+
     // Compare syllable by syllable; an omitted non-neutral tone never silently passes.
     fun pinyinMatches(input: String, expected: String): Boolean {
         val source = Normalizer.normalize(input, Normalizer.Form.NFC).lowercase(Locale.ROOT).trim().replace("u:", "ü").replace('v', 'ü')

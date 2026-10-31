@@ -556,6 +556,20 @@ class MainActivity : AppCompatActivity() {
             result.add(label(word.writtenForms.joinToString(" / "), 48f, jade), 12)
             result.add(label("${word.pinyin}  ·  ${Answers.tones(word).joinToString(" + ")}", 20f, ink, true), 4)
             result.add(label(word.meanings.joinToString(" / "), 18f), 8)
+            if (word.example.isNotBlank()) {
+                result.add(label("Пример: ${word.example}", 22f, jade), 16)
+                result.add(label(word.examplePinyin, 17f), 6)
+                result.add(label(word.exampleTranslation, 17f), 6)
+                result.add(button("▶  Прослушать предложение") {
+                    voice.play(word.copy(hanzi = word.example), "system", store.slowAudio)?.let { message("Звук недоступен", it) }
+                }, 8)
+            }
+            if (!correct && !store.answerIgnored && task.skill in StudyStore.characterSkills && store.draft in store.choices) {
+                result.add(label("Сравните: ${word.hanzi} ≠ ${store.draft}", 24f, jade), 12)
+                store.studyWords.firstOrNull { it.acceptsForm(store.draft) }?.let { other ->
+                    result.add(label("${other.hanzi} · ${other.pinyin} · ${other.meanings.joinToString(" / ")}", 17f), 6)
+                }
+            }
             if (word.hint.isNotBlank()) result.add(label(word.hint, 15f, muted), 12)
             result.add(label(if (store.answerIgnored) "Попытка отменена. Ошибки, серия ответов и срок повторения восстановлены." else if (!correct) "Вернётся после 4–7 других заданий. Для закрепления нужны два верных ответа подряд." else if (!store.studyEngine.state(task).mastered) "Нужен ещё один верный ответ после паузы." else "Навык закреплён в этом цикле.", 13f, if (store.answerIgnored) muted else if (correct) jade else red), 12)
             response.add(result, 14)
@@ -662,18 +676,50 @@ class MainActivity : AppCompatActivity() {
     private fun previewImport(preview: PackImport.Preview, created: () -> Unit = {}) {
         val box = column().apply { setPadding(dp(24), dp(8), dp(24), dp(16)) }
         box.add(label("${preview.words.size} слов. Создадим отдельный набор с новым прогрессом. Другие наборы сохранятся.", 15f, muted))
+        var importDialog: AlertDialog? = null
+        val warnings = store.duplicateWarnings(preview.words)
+        if (warnings.isNotEmpty()) box.add(label("Возможные дубликаты (${warnings.size}):\n${warnings.take(20).joinToString("\n")}", 15f, red), 12)
         val name = field("Название набора", preview.name, box)
+        box.add(button("Обновить существующий набор…") {
+            val packs = store.packNames
+            MaterialAlertDialogBuilder(this).setTitle("Какой набор обновить?")
+                .setItems(packs.map { it.second }.toTypedArray()) { _, index ->
+                    previewPackUpdate(packs[index].first, name.text.toString(), preview.words) { importDialog?.dismiss(); created() }
+                }.setNegativeButton("Отмена", null).show()
+        }, 12)
         preview.words.take(8).forEach { word ->
             box.add(label("${word.writtenForms.joinToString(" / ")} · ${word.pinyin}\n${word.meanings.joinToString(" / ")}", 16f, ink), 12)
         }
         if (preview.words.size > 8) box.add(label("И ещё ${preview.words.size - 8} слов. Все слова можно просмотреть и изменить после импорта.", 13f, muted), 12)
         val dialog = MaterialAlertDialogBuilder(this).setTitle("Проверьте набор")
             .setView(ScrollView(this).apply { addView(box) }).setPositiveButton("Создать набор", null).setNegativeButton("Назад", null).create()
+        importDialog = dialog
         dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             try { store.importPack(name.text.toString(), preview.words); store.route = "words"; dialog.dismiss(); created(); render(); toast("Набор создан") }
             catch (e: Exception) { name.error = e.message }
         } }; dialog.show()
     }
+    private fun previewPackUpdate(target: String, name: String, words: List<Word>, completed: () -> Unit) {
+        try {
+            val update = store.previewUpdate(words, target)
+            val box = column().apply { setPadding(dp(24), dp(12), dp(24), dp(16)) }
+            box.add(label("${store.packNames.first { it.first == target }.second} → $name\nДобавится: ${update.added.size} · Изменится: ${update.changed.size}\nСлов вне файла останется: ${update.retained.size}\nПрогресс и выбор существующих слов сохранятся. Удалений нет.", 16f))
+            update.added.forEach { box.add(label("+ ${it.hanzi} · ${it.pinyin} · ${it.meanings.joinToString(" / ")}"), 12) }
+            update.changed.forEach { (old, new) ->
+                fun details(w: Word) = "${w.hanzi} · ${w.pinyin} (${w.numbered}) · ${w.meanings.joinToString(" / ")}\nФормы: ${w.alternatives.joinToString()}\nВарианты: ${w.distractors.joinToString()}\n${w.hint}\n${w.example} ${w.examplePinyin} ${w.exampleTranslation}"
+                box.add(label("Было: ${details(old)}\nСтало: ${details(new)}", 15f), 16)
+            }
+            MaterialAlertDialogBuilder(this).setTitle("Изменения набора")
+                .setView(ScrollView(this).apply { addView(box) })
+                .setPositiveButton("Применить") { _, _ ->
+                    try {
+                        store.editPack(target); store.updatePack(name, words); store.route = "words"
+                        completed(); render(); toast("Набор обновлён, прогресс сохранён")
+                    } catch (e: Exception) { message("Проверьте набор", e.message ?: "Ошибка обновления") }
+                }.setNegativeButton("Отмена", null).show()
+        } catch (e: Exception) { message("Проверьте набор", e.message ?: "Ошибка обновления") }
+    }
+
     private fun practicePicker(parent: LinearLayout = content) {
         parent.add(button("Наборы для практики: ${store.practicePackIds.size} ▾") {
             val names = store.packNames
@@ -789,7 +835,18 @@ class MainActivity : AppCompatActivity() {
         fill(""); search.doAfterTextChanged { fill(it.toString()) }
     }
     private fun stats() {
-        heading("Прогресс", "Результаты по выбранному набору.")
+        heading("Прогресс", "Обзор всей библиотеки и подробности по набору.")
+        val overview = store.overview()
+        val combined = card()
+        combined.add(label("Все наборы · ${overview.sumOf { it.total }} слов", 22f, jade, true))
+        combined.add(label("Введено: ${overview.sumOf { it.introduced }} · Слов изучено: ${overview.sumOf { it.learned }}\nНавыков закреплено: ${overview.sumOf { it.mastered }} · Повторений пора: ${overview.sumOf { it.due }}", 17f), 12)
+        combined.add(label("Слово изучено, когда закреплены все доступные направления, включая письмо и аудирование. Повторения считаются по навыкам. Одинаковые слова в разных наборах учитываются отдельно.", 13f, muted), 8)
+        overview.forEach { pack -> combined.add(label("${pack.name}: введено ${pack.introduced}/${pack.total} · изучено ${pack.learned} · пора повторить ${pack.due}", 15f), 10) }
+        Skill.entries.forEach { skill ->
+            val states = overview.flatMap { it.skills[skill].orEmpty() }
+            combined.add(label("${skill.title}: закреплено ${states.count { it.mastered }}/${states.size} · трудных ${states.count { it.errors > 0 && !it.mastered }} · ошибок ${states.sumOf { it.errors }}/${states.sumOf { it.attempts }}", 14f), 8)
+        }
+        content.add(combined, 16)
         packPicker()
         val all = store.engine.tasks(store.words, false, store.audioEnabled)
         val writing = store.engine.tasks(store.words, true, false)
@@ -802,6 +859,24 @@ class MainActivity : AppCompatActivity() {
         content.add(summary, 20)
         content.add(label("Что сложнее запомнить", 22f, ink, true), 24)
         content.add(label("Сначала — незакреплённые задания. Чем чаще ошибки и короче серия верных ответов, тем выше задание в списке.", 13f, muted), 8)
+        val pairs = store.engine.progress.entries.flatMap { (key, state) ->
+            val word = store.words.firstOrNull { key.substringBefore(':') == it.id }
+            state.confusions.entries.filter { word != null && !word.acceptsForm(it.key) }.map { Triple(word!!, it.key, it.value) }
+        }.sortedByDescending { it.third }
+        if (pairs.isNotEmpty()) {
+            content.add(label("Часто путаю", 22f, ink, true), 16)
+            pairs.take(20).forEach { (word, wrong, count) -> content.add(label("${word.hanzi} ↔ $wrong · $count ошибок", 17f), 6) }
+            content.add(button("Практиковать похожие знаки") {
+                val focus = store.engine.progress.filter { (key, p) -> p.confusions.isNotEmpty() && store.words.any { it.id == key.substringBefore(':') } }
+                    .keys.mapNotNull { key -> Skill.entries.find { it.name == key.substringAfter(':') }?.let { Task(key.substringBefore(':'), it) } }
+                val partners = focus.flatMap { task ->
+                    val wrong = store.engine.state(task).confusions.keys
+                    store.words.filter { word -> word.writtenForms.any { it in wrong } }.map { Task(it.id, task.skill) }
+                }
+                store.choosePracticePacks(setOf(store.activePackId))
+                startShort(false, (focus + partners).distinct())
+            }, 12)
+        }
         val problematic = RecallDifficulty.rank(all + writing, store.engine.progress)
         if (problematic.isNotEmpty()) content.add(button("Практиковать трудные слова", true) {
             val groups = listOf("Все трудные задания", "Тоны", "Аудирование", "Значение", "Написание")
@@ -1126,6 +1201,9 @@ class MainActivity : AppCompatActivity() {
         val alternatives = field("Другие формы слова / радикала · через ;", original?.alternatives?.joinToString("; ") ?: "", form)
         form.add(label("Например, для радикала 水 можно указать 氵. Добавляйте только формы, допустимые именно для этой карточки: они будут приниматься в ответах и показываться при проверке письма.", 13f, muted), 6)
         val hint = field("Подсказка после ответа", original?.hint ?: "", form)
+        val example = field("Пример на китайском (необязательно)", original?.example ?: "", form)
+        val examplePinyin = field("Пиньинь примера", original?.examplePinyin ?: "", form)
+        val exampleTranslation = field("Перевод примера на русский", original?.exampleTranslation ?: "", form)
         form.add(label("Не менее 3 неверных вариантов. Изменение карточки сбрасывает её учебный прогресс.", 13f, muted), 12)
         val scroll = ScrollView(this).apply { addView(form) }
         val dialog = MaterialAlertDialogBuilder(this).setTitle(if (original == null) "Новое слово" else "Изменить слово")
@@ -1136,7 +1214,7 @@ class MainActivity : AppCompatActivity() {
             shown.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 try {
                     fun parts(input: TextInputEditText) = input.text.toString().split(';').map { it.trim() }.filter { it.isNotBlank() }
-                    val word = Word(original?.id ?: UUID.randomUUID().toString(), hanzi.text.toString().trim(), pinyin.text.toString().trim(), numbered.text.toString().trim(), parts(meanings), parts(distractors), hint.text.toString().trim(), parts(alternatives))
+                    val word = Word(original?.id ?: UUID.randomUUID().toString(), hanzi.text.toString().trim(), pinyin.text.toString().trim(), numbered.text.toString().trim(), parts(meanings), parts(distractors), hint.text.toString().trim(), parts(alternatives), example.text.toString().trim(), examplePinyin.text.toString().trim(), exampleTranslation.text.toString().trim())
                     StudyStore.validate(word)
                     require(store.words.none { it.id != word.id && it.hanzi == word.hanzi }) { "Это слово уже есть. Измените существующую карточку." }
                     store.replaceWord(word); shown.dismiss(); render()

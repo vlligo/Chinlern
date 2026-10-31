@@ -7,7 +7,8 @@ import kotlin.random.Random
 data class Word(
     val id: String, val hanzi: String, val pinyin: String, val numbered: String,
     val meanings: List<String>, val distractors: List<String>, val hint: String = "",
-    val alternatives: List<String> = emptyList()
+    val alternatives: List<String> = emptyList(),
+    val example: String = "", val examplePinyin: String = "", val exampleTranslation: String = ""
 ) {
     val writtenForms: List<String> get() = (listOf(hanzi) + alternatives).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
     fun acceptsForm(value: String) = value.trim() in writtenForms
@@ -30,7 +31,8 @@ data class Task(val wordId: String, val skill: Skill) { val key get() = "$wordId
 data class Progress(
     var attempts: Int = 0, var errors: Int = 0, var streak: Int = 0,
     var mastered: Boolean = false, var nextAt: Int = 0, var due: Long = 0,
-    var interval: Int = 0
+    var interval: Int = 0,
+    var confusions: Map<String, Int> = emptyMap()
 )
 
 object Answers {

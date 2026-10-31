@@ -234,6 +234,10 @@ class StudyStore(context: Context, userId: String? = null) {
             .put("activePrevious", engine.previous?.key ?: JSONObject.NULL)
         beforeAnswer = studyEngine.state(task).copy()
         studyEngine.answer(task, correct)
+        if (!correct && task.skill in characterSkills && draft in choices) {
+            val state = studyEngine.state(task)
+            state.confusions = state.confusions + (draft to ((state.confusions[draft] ?: 0) + 1))
+        }
         if (shortSession) this.session.put("count", sessionCount + 1).put("correct", sessionCorrect + if (correct) 1 else 0)
         feedback = correct; answerIgnored = false
         save()
@@ -289,7 +293,17 @@ class StudyStore(context: Context, userId: String? = null) {
         if (sessionFinished) { save(); return }
         val available = tasks()
         current = studyEngine.next(available) ?: if (shortSession) available.filter { it != studyEngine.previous }.ifEmpty { available }.randomOrNull() else null
-        current?.let { task -> choices = studyEngine.options(studyWords.first { it.id == task.wordId }) }
+        current?.let { task ->
+            val word = studyWords.first { it.id == task.wordId }
+            val confused = studyEngine.state(task).confusions.entries
+                .filter { !word.acceptsForm(it.key) }.sortedByDescending { it.value }.map { it.key }
+            val reciprocal = (mixedStudy()?.words ?: words).filter { other -> other.id != word.id &&
+                studyEngine.progress[Task(other.id, task.skill).key]?.confusions?.keys?.any { word.acceptsForm(it) } == true
+            }.map { it.hanzi }
+            val comparisons = (confused + reciprocal).filter { !word.acceptsForm(it) }.distinct()
+            choices = if (task.skill in characterSkills && comparisons.isNotEmpty())
+                (comparisons.take(3) + word.hanzi).shuffled() else studyEngine.options(word)
+        }
         save()
     }
     fun save() {
@@ -443,7 +457,65 @@ class StudyStore(context: Context, userId: String? = null) {
         clearQuestion()
         save()
     }
+    fun duplicateWarnings(incoming: List<Word>): List<String> {
+        save()
+        val withinFile = incoming.flatMapIndexed { index, word -> incoming.drop(index + 1).mapNotNull { other ->
+            if (word.writtenForms.any { it in other.writtenForms } ||
+                (Answers.pronunciationKey(word) == Answers.pronunciationKey(other) && word.meanings.any { a -> other.meanings.any { Answers.meaning(a) == Answers.meaning(it) } }))
+                "${word.hanzi} ↔ ${other.hanzi} · внутри файла" else null
+        } }
+        return withinFile + packNames.flatMap { (id, name) ->
+            val existing = decodeWords(packs.getJSONObject(id).getString("words"))
+            incoming.mapNotNull { word ->
+                existing.firstOrNull { old -> old.writtenForms.any { it in word.writtenForms } ||
+                    (Answers.pronunciationKey(old) == Answers.pronunciationKey(word) &&
+                        old.meanings.any { a -> word.meanings.any { Answers.meaning(a) == Answers.meaning(it) } })
+                }?.let { "${word.hanzi} ↔ ${it.hanzi} · $name" }
+            }
+        }.distinct()
+    }
+
+    fun previewUpdate(incoming: List<Word>, packId: String = activePackId): PackMaintenance.Update {
+        incoming.forEach { validate(it) }
+        val existing = if (packId == activePackId) words else decodeWords(packs.getJSONObject(packId).getString("words"))
+        return PackMaintenance.preview(existing, incoming)
+    }
+
+    fun updatePack(name: String, incoming: List<Word>) {
+        require(name.trim().length in 1..80) { "Введите название до 80 знаков." }
+        val update = previewUpdate(incoming)
+        update.words.forEach { validate(it) }
+        invalidatePractice()
+        val oldIds = words.map { it.id }.toSet()
+        words = update.words.toMutableList()
+        selected.addAll(words.filter { it.id !in oldIds }.map { it.id })
+        packs.getJSONObject(activePackId).put("name", name.trim())
+        save()
+    }
+
+    data class PackOverview(val name: String, val total: Int, val introduced: Int, val learned: Int,
+        val mastered: Int, val due: Int, val skills: Map<Skill, List<Progress>>)
+
+    fun overview(): List<PackOverview> {
+        save()
+        val now = System.currentTimeMillis()
+        return packNames.map { (id, name) ->
+            val pack = packs.getJSONObject(id)
+            val vocabulary = decodeWords(pack.getString("words"))
+            val saved = pack.getJSONObject("progress")
+            val progress = saved.keys().asSequence().associateWith { readProgress(saved.getJSONObject(it)) }
+            val tasks = LearningEngine().tasks(vocabulary, false, true) + LearningEngine().tasks(vocabulary, true, false)
+            PackOverview(name, vocabulary.size,
+                vocabulary.count { w -> introductions.has("$id/${w.id}") || Skill.entries.any { (progress[Task(w.id, it).key]?.attempts ?: 0) > 0 } },
+                vocabulary.count { w -> tasks.filter { it.wordId == w.id }.all { progress[it.key]?.mastered == true } },
+                tasks.count { progress[it.key]?.mastered == true },
+                tasks.count { progress[it.key]?.let { p -> p.due > 0 && p.due <= now } == true },
+                tasks.groupBy { it.skill }.mapValues { (_, values) -> values.map { progress[it.key] ?: Progress() } })
+        }
+    }
+
     companion object {
+        val characterSkills = setOf(Skill.MEANING_CHARACTER, Skill.PINYIN_CHARACTER, Skill.AUDIO_CHARACTER)
         private fun profilePreferences(context: Context, userId: String?): android.content.SharedPreferences {
             val guest = context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE)
             if (userId == null) return guest
@@ -492,8 +564,8 @@ class StudyStore(context: Context, userId: String? = null) {
             val parts = key.split(':')
             return if (parts.size == 2) Task(parts[0], Skill.valueOf(parts[1])) else null
         }
-        private fun readProgress(j: JSONObject) = Progress(j.optInt("attempts"), j.optInt("errors"), j.optInt("streak"), j.optBoolean("mastered"), j.optInt("nextAt"), j.optLong("due"), j.optInt("interval"))
-        private fun writeProgress(p: Progress) = JSONObject().put("attempts", p.attempts).put("errors", p.errors).put("streak", p.streak).put("mastered", p.mastered).put("nextAt", p.nextAt).put("due", p.due).put("interval", p.interval)
+        private fun readProgress(j: JSONObject) = Progress(j.optInt("attempts"), j.optInt("errors"), j.optInt("streak"), j.optBoolean("mastered"), j.optInt("nextAt"), j.optLong("due"), j.optInt("interval"), j.optJSONObject("confusions")?.let { pairs -> pairs.keys().asSequence().associateWith { pairs.getInt(it) } } ?: emptyMap())
+        private fun writeProgress(p: Progress) = JSONObject().put("attempts", p.attempts).put("errors", p.errors).put("streak", p.streak).put("mastered", p.mastered).put("nextAt", p.nextAt).put("due", p.due).put("interval", p.interval).put("confusions", JSONObject(p.confusions))
         private fun JSONArray.strings() = (0 until length()).map { getString(it) }
         fun decodeWords(text: String): List<Word> {
             val arr = if (text.trim().startsWith("[")) JSONArray(text) else JSONObject(text).getJSONArray("words")
@@ -504,7 +576,8 @@ class StudyStore(context: Context, userId: String? = null) {
                 val word = Word(j.optString("id", j.getString("hanzi")), j.getString("hanzi").trim(),
                     j.getString("pinyin").trim(), j.optString("numbered", j.getString("pinyin")).trim(), j.getJSONArray("meanings").strings().map { it.trim() }.filter { it.isNotEmpty() },
                     (j.optJSONArray("distractors")?.strings() ?: ((0 until arr.length()).map { arr.getJSONObject(it).getString("hanzi") } + listOf("水", "火", "木", "人", "口", "日", "月", "山"))).map { it.trim() }.filter { it.isNotEmpty() && it != j.getString("hanzi") && it !in (j.optJSONArray("alternatives")?.strings() ?: emptyList()) }.distinct().take(5), j.optString("hint"),
-                    j.optJSONArray("alternatives")?.strings()?.map { it.trim() }?.filter { it.isNotEmpty() }?.distinct() ?: emptyList())
+                    j.optJSONArray("alternatives")?.strings()?.map { it.trim() }?.filter { it.isNotEmpty() }?.distinct() ?: emptyList(),
+                    j.optString("example").trim(), j.optString("examplePinyin").trim(), j.optString("exampleTranslation").trim())
                 validate(word)
                 word
                 } catch (e: Exception) { throw IllegalArgumentException("Карточка ${index + 1}: ${e.message ?: "проверьте поля"}", e) }
@@ -514,6 +587,8 @@ class StudyStore(context: Context, userId: String? = null) {
             return result
         }
         fun validate(w: Word) {
+            val exampleFields = listOf(w.example, w.examplePinyin, w.exampleTranslation)
+            require(exampleFields.all { it.isBlank() } || exampleFields.all { it.isNotBlank() && it.length <= 2000 }) { "Для примера заполните предложение, пиньинь и перевод (до 2000 знаков каждый)." }
             require(w.id.isNotBlank() && ':' !in w.id && w.id.length <= 100) { "Некорректный id." }
             require(w.hanzi.isNotBlank() && w.hanzi.length <= 30) { "Введите иероглифы (до 30 знаков)." }
             require(w.alternatives.size <= 30 && w.alternatives.all { it.isNotBlank() && it.length <= 30 }) { "Допустимо до 30 вариантов, каждый от 1 до 30 знаков." }
@@ -526,6 +601,7 @@ class StudyStore(context: Context, userId: String? = null) {
             JSONObject().put("id", w.id).put("hanzi", w.hanzi).put("pinyin", w.pinyin).put("numbered", w.numbered)
                 .put("meanings", JSONArray(w.meanings)).put("distractors", JSONArray(w.distractors))
                 .put("hint", w.hint).put("alternatives", JSONArray(w.alternatives))
+                .put("example", w.example).put("examplePinyin", w.examplePinyin).put("exampleTranslation", w.exampleTranslation)
         })).toString(2)
         val seedJson = """[
           {"id":"water","hanzi":"水","pinyin":"shuǐ","numbered":"shui3","meanings":["вода"],"distractors":["永","冰","泳","求"],"hint":"水 — вода. У 永 есть дополнительная точка сверху."},

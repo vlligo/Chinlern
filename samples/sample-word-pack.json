@@ -28,7 +28,10 @@
       "pinyin": "shui3",
       "meanings": [
         "вода"
-      ]
+      ],
+      "example": "我喝水。",
+      "examplePinyin": "Wǒ hē shuǐ.",
+      "exampleTranslation": "Я пью воду."
     }
   ]
 }

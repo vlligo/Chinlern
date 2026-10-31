@@ -227,3 +227,13 @@ Install updates with `adb -s DEVICE_SERIAL install -r app/build/outputs/apk/debu
 The test APK now registers `SafeTestRunner`, which rejects data-resetting instrumentation on physical devices before any tests run. Only the explicit read-only `PhoneSmokeTest` invocation is allowed there.
 
 Validation: build, 45 unit tests, and lint pass; 14 focused emulator tests cover account-specific access persistence, migration from successful sync, library state, and short sessions. An in-place phone update was verified to preserve every existing preference file byte-for-byte.
+
+### Usage examples, comparisons, and pack updates
+
+Cards accept optional `example`, `examplePinyin`, and `exampleTranslation` strings (Chinese sentence, pinyin, and Russian translation). Supply all three or omit all three. Examples appear after answering and can be played with the device's Chinese voice.
+
+Wrong character choices are saved per word and skill, included in backups and sync, and reused as distractors in comparison practice. The Progress screen offers a focused session for these pairs. Ignoring an accidental answer also rolls back its recorded confusion.
+
+Progress includes a library-wide overview of introduced words, learned words, mastered skills, due reviews, and difficulties by skill. A learned word has all applicable skills mastered, including writing and audio. Counts are per pack; repeated vocabulary in separate packs is counted separately.
+
+Import previews warn about likely duplicates within the file and across packs. Choose “Обновить существующий набор…” to review additions and before/after card changes. Updates match the same hanzi to existing local IDs, preserve progress and selection, and retain words omitted from the file. Reusing an ID for a different word is rejected to prevent transferring unrelated progress.

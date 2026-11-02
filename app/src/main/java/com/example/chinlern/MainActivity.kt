@@ -49,6 +49,7 @@ class MainActivity : AppCompatActivity() {
     private var syncStatusLabel: TextView? = null
     private lateinit var content: LinearLayout
     private lateinit var quizActions: LinearLayout
+    private lateinit var keyboardQuestion: LinearLayout
     private var voiceMessage: String? = null
     private var audioNotice: TextView? = null
     private var answerInput: TextInputEditText? = null
@@ -66,12 +67,68 @@ class MainActivity : AppCompatActivity() {
     private val red = Color.rgb(159, 41, 54)
     private val gold = Color.rgb(173, 126, 41)
     private val blush = Color.rgb(247, 232, 225)
-    private val importFile = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) try {
-            val bytes = contentResolver.openInputStream(uri)?.use { it.readNBytesCompat(2_000_001) } ?: error("Не удалось открыть файл")
-            require(bytes.size <= 2_000_000) { "Файл слишком большой (максимум 2 МБ)." }
-            previewImport(PackImport.parse(bytes.toString(Charsets.UTF_8)))
-        } catch (e: Exception) { message("Импорт не выполнен", e.message ?: "Проверьте формат JSON.") }
+    private val importFile = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) readPackFiles(uris.distinct())
+    }
+    private fun readPackFiles(uris: List<android.net.Uri>) {
+        if (uris.size > PackFiles.MAX_FILES) { message("Импорт не выполнен", "Выберите не более 100 файлов."); return }
+        val owner = profileUid
+        toast("Читаем файлы…")
+        Thread {
+            val items = mutableListOf<PackFiles.Item>()
+            val errors = mutableListOf<String>()
+            val budget = PackFiles.Budget()
+            for ((index, uri) in uris.withIndex()) {
+                var name = "Файл ${index + 1}"
+                try {
+                    runCatching {
+                        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                            if (it.moveToFirst()) name = it.getString(0) ?: name
+                        }
+                    }
+                    val result = contentResolver.openInputStream(uri)?.use { PackFiles.read(name, it, budget) }
+                        ?: error("Не удалось открыть файл. Скачайте его на устройство и выберите снова.")
+                    items += result.items; errors += result.errors
+                } catch (e: Exception) { errors += "$name: ${e.message ?: "Не удалось прочитать файл"}" }
+                if (budget.bytes > PackFiles.MAX_TOTAL_BYTES || budget.entries > PackFiles.MAX_FILES) break
+            }
+            runOnUiThread {
+                if (!isDestroyed && !isFinishing && owner == profileUid) {
+                    if (items.size == 1 && errors.isEmpty()) previewImport(items.single().preview)
+                    else previewFileBatch(items, errors, owner)
+                }
+            }
+        }.start()
+    }
+    private fun previewFileBatch(items: List<PackFiles.Item>, errors: List<String>, owner: String?) {
+        val box = column().apply { setPadding(dp(24), dp(12), dp(24), dp(16)) }
+        box.add(label("Готово наборов: ${items.size}. Каждый станет отдельным набором с новым прогрессом.", 16f))
+        val selected = items.map { item ->
+            CheckBox(this).apply {
+                text = "${item.preview.name} · ${item.preview.words.size} слов\n${item.source}"
+                isChecked = true; box.add(this, 8)
+            }
+        }
+        if (errors.isNotEmpty()) box.add(label("Не удалось прочитать:\n${errors.joinToString("\n\n")}", 14f, red), 12)
+        val dialog = MaterialAlertDialogBuilder(this).setTitle("Проверьте наборы")
+            .setView(ScrollView(this).apply { addView(box) }).setNegativeButton("Отмена", null)
+            .setPositiveButton("Создать выбранные", null).create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = items.isNotEmpty()
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                if (owner != profileUid) { dialog.dismiss(); message("Импорт не выполнен", "Аккаунт изменился. Выберите файлы снова."); return@setOnClickListener }
+                val chosen = items.filterIndexed { index, _ -> selected[index].isChecked }
+                if (chosen.isEmpty()) { toast("Выберите хотя бы один набор"); return@setOnClickListener }
+                var created = 0
+                try {
+                    chosen.forEach { store.importPack(it.preview.name, it.preview.words); created++ }
+                    store.route = "words"; dialog.dismiss(); render(); toast("Создано наборов: $created")
+                } catch (e: Exception) {
+                    dialog.dismiss(); render(); message("Создано наборов: $created", e.message ?: "Не удалось сохранить остальные наборы")
+                }
+            }
+        }
+        dialog.show()
     }
     private val exportFile = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) try {
@@ -205,8 +262,7 @@ class MainActivity : AppCompatActivity() {
         profileUid?.let { uid -> cloud = CloudSync(store, uid, { status ->
             syncStatus = status
             syncStatusLabel?.text = status
-        }, { conflicts, changed ->
-            if (conflicts > 0) message("Изменения сохранены", "Обнаружены несовместимые изменения на двух устройствах. Изменённые наборы сохранены; дополнительные версии имеют пометку «копия конфликта». Если удаление совпало с изменением, изменённая версия сохранена для проверки.")
+        }, { _, changed ->
             if (changed && store.route != "quiz") render()
         }) }
     }
@@ -265,6 +321,11 @@ class MainActivity : AppCompatActivity() {
         contentWidthDp = (windowWidth - (if (tablet) railWidth else 0) - (if (tablet) 48 else 36) - 16).coerceAtLeast(240).coerceAtMost(1040)
         wideContent = contentWidthDp >= 720 && resources.configuration.fontScale <= 1.3f
         val root = column().apply { setBackgroundColor(paper) }
+        keyboardQuestion = column().apply {
+            visibility = View.GONE
+            setPadding(dp(18), dp(8), dp(18), dp(8))
+            setBackgroundColor(pale)
+        }
         val header = row().apply { setPadding(dp(22), dp(12), dp(22), dp(12)) }
         header.addView(ImageView(this).apply {
             setImageResource(R.drawable.brand_mark)
@@ -278,6 +339,7 @@ class MainActivity : AppCompatActivity() {
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             val keyboard = insets.getInsets(WindowInsetsCompat.Type.ime())
             header.visibility = if (store.route == "quiz" && keyboard.bottom > 0) View.GONE else View.VISIBLE
+            keyboardQuestion.visibility = if (tablet && store.route == "quiz" && keyboard.bottom > 0 && keyboardQuestion.childCount > 0) View.VISIBLE else View.GONE
             v.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, keyboard.bottom))
             WindowInsetsCompat.CONSUMED
         }
@@ -297,6 +359,7 @@ class MainActivity : AppCompatActivity() {
         holder.addView(content, LinearLayout.LayoutParams(if (windowWidth - (if (tablet) railWidth else 0) - 48 > 1040) dp(1040) else -1, -2))
         scroll.addView(holder)
         val workspace = column()
+        workspace.add(keyboardQuestion)
         workspace.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         quizActions = column().apply {
             visibility = View.GONE
@@ -324,8 +387,8 @@ class MainActivity : AppCompatActivity() {
         }
         setContentView(root)
         ViewCompat.getRootWindowInsets(window.decorView)?.let { ViewCompat.dispatchApplyWindowInsets(root, it) }
-        ViewCompat.requestApplyInsets(root)
         when (store.route) { "quiz" -> quiz(); "words" -> library(); "stats" -> stats(); "settings" -> settings(); else -> dashboard() }
+        ViewCompat.requestApplyInsets(root)
     }
     private fun dashboard() {
         heading("Практика", "Выберите наборы и начните занятие.")
@@ -369,7 +432,7 @@ class MainActivity : AppCompatActivity() {
         content.add(short, 16)
         val learn = card()
         learn.add(label("Значение и произношение", 21f, ink, true))
-        learn.add(label("Перевод, пиньинь и тоны. ${if (store.audioEnabled) "Задания на слух включены." else "Задания на слух выключены."}", 15f, muted), 8)
+        learn.add(label("Все выбранные слова без дневного лимита. Перевод, пиньинь и тоны. ${if (store.audioEnabled) "Задания на слух включены." else "Задания на слух выключены."}", 15f, muted), 8)
         learn.add(button(if (knowledge.isNotEmpty() && knowledge.all { store.studyEngine.state(it).mastered }) "Посмотреть результаты" else "Продолжить обучение", true) { start(false) }, 18)
         val write = card()
         write.add(label("Написание", 21f, ink, true))
@@ -471,6 +534,22 @@ class MainActivity : AppCompatActivity() {
         question.add(label(task.skill.instruction, 20f, ink, true), 14)
         if (store.studyEngine.state(task).mastered && store.feedback == null) question.add(label("Закрепление между повторениями", 12f, jade), 6)
         val audio = task.skill in listOf(Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER)
+        // Keep the actual question outside the answer scroller while the tablet IME is open.
+        if (store.feedback == null) {
+            val prompt = when (task.skill) {
+                Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER -> "Послушайте запись"
+                Skill.MEANING_PINYIN, Skill.MEANING_CHARACTER, Skill.WRITING -> word.meanings.first()
+                Skill.PINYIN_MEANING, Skill.PINYIN_CHARACTER -> word.pinyin
+                else -> word.writtenForms.joinToString(" / ")
+            }
+            val context = row()
+            val text = column()
+            text.add(label(task.skill.instruction, 13f, muted))
+            text.add(label(prompt, 26f, jade, true).apply { contentDescription = "Текущий вопрос" }, 2)
+            context.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
+            if (audio) context.addView(button("▶ Слушать") { play(word) }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(12) })
+            keyboardQuestion.add(context)
+        }
         if (audio) {
             question.add(label("♪", 64f, jade).apply { gravity = Gravity.CENTER; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }, 14)
             question.add(button("▶  Послушать", true) { play(word) }, 8)
@@ -635,7 +714,7 @@ class MainActivity : AppCompatActivity() {
         box.add(label("1. Скопируйте правила и отправьте их любой внешней модели вместе со своими словами.\n2. Скопируйте её ответ или скачайте файл.\n3. Вернитесь сюда, вставьте ответ и проверьте набор.", 16f, ink))
         box.add(button("1 · Правила для модели", true) { showPackPrompt() }, 16)
         box.add(button("2 · Вставить ответ модели") { hub.dismiss(); pastePack() }, 10)
-        box.add(button("Или выбрать файл") { hub.dismiss(); importFile.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) }, 10)
+        box.add(button("Или выбрать файлы / ZIP") { hub.dismiss(); importFile.launch(arrayOf("*/*")) }, 10)
         box.add(label("Модель выбираете вы. Приложение само ничего ей не отправляет. Перед созданием проверьте переводы и тоны.", 13f, muted), 12)
         hub = MaterialAlertDialogBuilder(this).setTitle("Новый набор с помощью ИИ")
             .setView(ScrollView(this).apply { addView(box) }).setPositiveButton("Закрыть", null).create()
@@ -778,7 +857,7 @@ class MainActivity : AppCompatActivity() {
             MaterialAlertDialogBuilder(this).setTitle("Наборы слов").setItems(arrayOf("Создать набор с помощью ИИ / вставить ответ", "Импортировать файл", "Экспортировать набор")) { _, which ->
                 when (which) {
                     0 -> importHub()
-                    1 -> importFile.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
+                    1 -> importFile.launch(arrayOf("*/*"))
                     2 -> chooseEditingPack { exportFile.launch("chinlearn-words.json") }
                 }
             }.show()
@@ -788,6 +867,7 @@ class MainActivity : AppCompatActivity() {
             val packs = store.libraryPacks()
             return "Выбрано ${packs.sumOf { it.selected.size }} из ${packs.sumOf { it.words.size }}"
         }
+        content.add(label("Отметьте отдельно: «Узнаю слово» — знание значения, пиньиня и произношения; «Умею писать» — написание по памяти. Отмеченные навыки считаются закреплёнными и вернутся на повторение завтра. Снимите отметку, чтобы учить их снова. Отметки действуют в этом наборе.", 13f, muted), 12)
         val selectedLabel = label(selectionText(), 14f, jade)
         content.add(selectedLabel, 16)
         val search = field("Найти слово, пиньинь или перевод", "", content)
@@ -817,6 +897,15 @@ class MainActivity : AppCompatActivity() {
                 line.addView(check)
                 val info = column().apply { add(label("${word.hanzi}   ${word.pinyin}", 25f, jade, true)); add(label(word.meanings.joinToString(" / "), 15f, muted), 6) }
                 line.addView(info, LinearLayout.LayoutParams(0, -2, 1f)); item.add(line)
+                WordKnowledge.entries.forEach { category ->
+                    item.add(CheckBox(this).apply {
+                        text = category.title
+                        contentDescription = "${category.title}: ${word.hanzi} · ${pack.name}"
+                        minHeight = dp(48); buttonTintList = ColorStateList.valueOf(jade)
+                        isChecked = word.id in if (category == WordKnowledge.RECOGNITION) pack.recognized else pack.writable
+                        setOnCheckedChangeListener { _, checked -> store.setWordKnown(pack.id, word.id, category, checked) }
+                    }, 4)
+                }
                 item.twoButtons(button("▶ Слушать") { play(word) }, button("Словарь") { dictionary(word) })
                 item.add(button("Изменить слово") { store.editPack(pack.id); editWord(word) }, 8)
                 item.add(button("Навыки этого слова") {

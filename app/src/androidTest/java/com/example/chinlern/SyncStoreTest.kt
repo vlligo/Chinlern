@@ -62,6 +62,31 @@ class SyncStoreTest {
         assertNotEquals(store.syncBase, store.syncSnapshot())
     }
 
+    @Test fun independentDeviceAnswersAndMidFlightEditsConvergeWithoutCopies() {
+        val phone = StudyStore(context, "test-a")
+        val tablet = StudyStore(context, "test-b")
+        val base = phone.syncSnapshot()
+        tablet.applySync(tablet.syncSnapshot(), base, "initial")
+        val other = Task("fire", Skill.CHARACTER_PINYIN)
+        phone.engine.answer(task, false, delay = 4)
+        tablet.engine.answer(other, true, delay = 4)
+        val pending = phone.syncSnapshot()
+        val server = SyncSnapshot.merge(base, pending, tablet.syncSnapshot()).packs
+        // A third answer arrives while the merged response is in flight.
+        val duringUpload = Task("tree", Skill.WRITING)
+        phone.engine.answer(duringUpload, true, delay = 4)
+        assertEquals(0, phone.applySync(pending, server, "merged"))
+        assertEquals(1, phone.packNames.size)
+        assertEquals(1, phone.engine.state(task).errors)
+        assertTrue(phone.engine.state(other).mastered)
+        assertTrue(phone.engine.state(duringUpload).mastered)
+        val next = SyncSnapshot.merge(server, phone.syncSnapshot(), server).packs
+        tablet.applySync(tablet.syncSnapshot(), next, "final")
+        phone.applySync(phone.syncSnapshot(), next, "final")
+        assertEquals(phone.syncSnapshot(), tablet.syncSnapshot())
+        assertEquals(phone.syncSnapshot(), StudyStore(context, "test-a").syncSnapshot())
+    }
+
     @Test fun unchangedRemoteRetainsUnfinishedQuestion() {
         val store = StudyStore(context)
         store.nextQuestion(); store.draft = "answer in progress"; store.strokes = "drawing"

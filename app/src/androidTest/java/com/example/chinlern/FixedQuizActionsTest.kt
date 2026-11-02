@@ -36,6 +36,10 @@ class FixedQuizActionsTest {
                 }
             }
             assertTrue("Test must exercise an open keyboard", keyboardVisible)
+            if (context.resources.configuration.screenWidthDp >= 600) {
+                onView(withContentDescription("Текущий вопрос")).check(matches(isCompletelyDisplayed())).check(matches(withText("水")))
+                onView(withHint("Русский перевод")).check(matches(isCompletelyDisplayed()))
+            }
             InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()?.let { bitmap ->
                 java.io.File(context.cacheDir, "quiz-keyboard.png").outputStream().use {
                     bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)

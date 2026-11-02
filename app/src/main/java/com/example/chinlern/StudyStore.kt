@@ -10,6 +10,26 @@ class StudyStore(context: Context, userId: String? = null) {
     private val packs = JSONObject(prefs.getString("packs", "{}")!!)
     var onSyncDataChanged: (() -> Unit)? = null
     private var lastSyncSnapshot = ""
+    private var encodedVocabulary: Pair<List<Word>, String>? = null
+
+    private fun encodedWords(): String {
+        val cached = encodedVocabulary
+        if (cached != null && cached.first == words) return cached.second
+        return encodeWords(words).also { encodedVocabulary = words.toList() to it }
+    }
+    private val decodedVocabulary = object : LinkedHashMap<String, List<Word>>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<Word>>?) = size > 8
+    }
+    private fun decodedWords(text: String): List<Word> =
+        decodedVocabulary.getOrPut(text) { decodeWords(text) }
+
+    private var encodedSyncBase: Pair<Map<String, String>, String>? = null
+    private fun syncBaseText(): String {
+        val cached = encodedSyncBase
+        if (cached != null && cached.first === syncBase) return cached.second
+        return SyncSnapshot.encode(syncBase).also { encodedSyncBase = syncBase to it }
+    }
+
     var syncBase: Map<String, String> = try { SyncSnapshot.decode(prefs.getString("syncBase", "{}")!!) } catch (_: Exception) { emptyMap() }
         private set
     var syncRevision: String? = prefs.getString("syncRevision", null)
@@ -18,7 +38,7 @@ class StudyStore(context: Context, userId: String? = null) {
         private set
     var activePackId = prefs.getString("activePack", "default")!!
         private set
-    val packNames: List<Pair<String, String>> get() = packs.keys().asSequence().map { it to packs.getJSONObject(it).getString("name") }.toList()
+    val packNames: List<Pair<String, String>> get() = PackOrder.sort(packs.keys().asSequence().map { it to packs.getJSONObject(it).getString("name") }.toList())
     val packName: String get() = packs.getJSONObject(activePackId).getString("name")
     private var mixed: MixedStudy? = null
     private var mixedPrevious = parseTask(prefs.getString("mixedPrevious", null))
@@ -68,11 +88,14 @@ class StudyStore(context: Context, userId: String? = null) {
         return "${origin?.packId ?: activePackId}/${origin?.wordId ?: word.id}"
     }
     fun needsPreview(word: Word) = !introductions.has(introductionKey(word)) &&
-        Skill.entries.none { (studyEngine.progress[Task(word.id, it).key]?.attempts ?: 0) > 0 }
+        Skill.entries.none { studyEngine.progress[Task(word.id, it).key]?.let { p -> p.attempts > 0 || p.mastered } == true }
     fun introduce(word: Word) { introductions.put(introductionKey(word), today()); save() }
     private fun eligibleWords(): List<Word> {
-        val used = introductions.keys().asSequence().count { introductions.optString(it) == today() }
         val words = studyWords
+        // The daily introduction budget belongs to short sessions, not unrestricted practice.
+        if (!shortSession || session.has("tasks")) return words
+        val date = today()
+        val used = introductions.keys().asSequence().count { introductions.optString(it) == date }
         val fresh = words.filter { needsPreview(it) }.take((dailyNewWords - used).coerceAtLeast(0)).map { it.id }.toSet()
         return words.filter { !needsPreview(it) || it.id in fresh }
     }
@@ -91,8 +114,8 @@ class StudyStore(context: Context, userId: String? = null) {
     init {
         if (userId != null && lastSyncedAt > 0) syncAccess.rememberPreviousAccess()
         if (!packs.has(activePackId)) packs.put(activePackId, JSONObject().put("name", "Мои слова"))
-        words = try { decodeWords(prefs.getString("words", null) ?: seedJson).toMutableList() }
-        catch (_: Exception) { decodeWords(seedJson).toMutableList() }
+        words = try { decodedWords(prefs.getString("words", null) ?: seedJson).toMutableList() }
+        catch (_: Exception) { decodedWords(seedJson).toMutableList() }
         selected.addAll(prefs.getStringSet("selected", words.map { it.id }.toSet()) ?: emptySet())
         selected.retainAll(words.map { it.id }.toSet())
         practicePackIds.retainAll(packNames.map { it.first }.toSet())
@@ -123,7 +146,7 @@ class StudyStore(context: Context, userId: String? = null) {
                 else {
                     val pack = packs.getJSONObject(id)
                     val progress = pack.getJSONObject("progress")
-                    MixedStudy.Source(id, decodeWords(pack.getString("words")), pack.getJSONArray("selected").strings().toSet(),
+                    MixedStudy.Source(id, decodedWords(pack.getString("words")), pack.getJSONArray("selected").strings().toSet(),
                         progress.keys().asSequence().associateWith { readProgress(progress.getJSONObject(it)) }, pack.optInt("step"))
                 }
             }
@@ -149,14 +172,39 @@ class StudyStore(context: Context, userId: String? = null) {
         save(); session = JSONObject(); mixed = null; mixedPrevious = null; practicePackIds.clear(); practicePackIds.addAll(ids)
         clearQuestion(); save()
     }
-    data class LibraryPack(val id: String, val name: String, val words: List<Word>, val selected: Set<String>)
+    data class LibraryPack(val id: String, val name: String, val words: List<Word>, val selected: Set<String>,
+        val recognized: Set<String>, val writable: Set<String>)
 
     fun libraryPacks(): List<LibraryPack> {
         save()
         return packNames.filter { it.first in practicePackIds }.map { (id, name) ->
             val pack = packs.getJSONObject(id)
-            LibraryPack(id, name, decodeWords(pack.getString("words")), pack.getJSONArray("selected").strings().toSet())
+            val vocabulary = decodedWords(pack.getString("words"))
+            val progress = pack.getJSONObject("progress")
+            val recognition = LearningEngine().tasks(vocabulary, false, true).groupBy { it.wordId }
+            LibraryPack(id, name, vocabulary, pack.getJSONArray("selected").strings().toSet(),
+                vocabulary.filter { word -> recognition[word.id].orEmpty().let { tasks ->
+                    tasks.isNotEmpty() && tasks.all { progress.optJSONObject(it.key)?.optBoolean("mastered") == true }
+                } }.map { it.id }.toSet(),
+                vocabulary.filter { progress.optJSONObject(Task(it.id, Skill.WRITING).key)?.optBoolean("mastered") == true }.map { it.id }.toSet())
         }
+    }
+
+    fun setWordKnown(packId: String, wordId: String, category: WordKnowledge, known: Boolean) {
+        require(packs.has(packId)) { "Набор не найден." }
+        val vocabulary = if (packId == activePackId) words else decodedWords(packs.getJSONObject(packId).getString("words"))
+        require(vocabulary.any { it.id == wordId }) { "Слово не найдено." }
+        // Flush mixed practice before changing a source pack, so its cache cannot undo the mark.
+        invalidatePractice()
+        if (packId == activePackId) engine.setKnown(wordId, category, known)
+        else {
+            val progress = packs.getJSONObject(packId).getJSONObject("progress")
+            val target = LearningEngine(progress.keys().asSequence().associateWith { readProgress(progress.getJSONObject(it)) }.toMutableMap())
+            target.step = packs.getJSONObject(packId).optInt("step")
+            target.setKnown(wordId, category, known)
+            target.progress.forEach { (key, value) -> progress.put(key, writeProgress(value)) }
+        }
+        save()
     }
 
     fun selectLibraryWord(packId: String, wordId: String, checked: Boolean) {
@@ -167,7 +215,7 @@ class StudyStore(context: Context, userId: String? = null) {
             if (checked) selected.add(wordId) else selected.remove(wordId)
         } else {
             val pack = packs.getJSONObject(packId)
-            require(decodeWords(pack.getString("words")).any { it.id == wordId })
+            require(decodedWords(pack.getString("words")).any { it.id == wordId })
             val selection = pack.getJSONArray("selected").strings().toMutableSet()
             if (checked) selection.add(wordId) else selection.remove(wordId)
             pack.put("selected", JSONArray(selection.toList()))
@@ -183,7 +231,7 @@ class StudyStore(context: Context, userId: String? = null) {
                 if (checked) selected.addAll(words.map { it.id })
             } else {
                 val pack = packs.getJSONObject(id)
-                pack.put("selected", JSONArray(if (checked) decodeWords(pack.getString("words")).map { it.id } else emptyList<String>()))
+                pack.put("selected", JSONArray(if (checked) decodedWords(pack.getString("words")).map { it.id } else emptyList<String>()))
             }
         }
         save()
@@ -210,7 +258,7 @@ class StudyStore(context: Context, userId: String? = null) {
             if (origin.packId == activePackId) words[words.indexOfFirst { it.id == origin.wordId }] = updated.copy(id = origin.wordId)
             else {
                 val pack = packs.getJSONObject(origin.packId)
-                pack.put("words", encodeWords(decodeWords(pack.getString("words")).map { if (it.id == origin.wordId) updated.copy(id = origin.wordId) else it }))
+                pack.put("words", encodeWords(decodedWords(pack.getString("words")).map { if (it.id == origin.wordId) updated.copy(id = origin.wordId) else it }))
             }
         }
     }
@@ -311,10 +359,12 @@ class StudyStore(context: Context, userId: String? = null) {
         flushMixed()
         val progressJson = JSONObject()
         engine.progress.filterValues { it != Progress() }.forEach { (key, p) -> progressJson.put(key, writeProgress(p)) }
-        packs.put(activePackId, JSONObject().put("name", packName).put("words", encodeWords(words))
+        val vocabulary = encodedWords()
+        packs.put(activePackId, JSONObject().put("name", packName).put("words", vocabulary)
             .put("selected", JSONArray(selected.toList())).put("progress", progressJson).put("step", engine.step))
+        val packData = packs.toString()
         prefs.edit().putString("shortSession", session.toString()).putString("introductions", introductions.toString())
-            .putBoolean("onboardingDone", onboardingDone).putInt("dailyNewWords", dailyNewWords).putStringSet("practicePacks", practicePackIds.toSet()).putString("packs", packs.toString()).putString("activePack", activePackId).putString("words", encodeWords(words)).putStringSet("selected", selected.toSet())
+            .putBoolean("onboardingDone", onboardingDone).putInt("dailyNewWords", dailyNewWords).putStringSet("practicePacks", practicePackIds.toSet()).putString("packs", packData).putString("activePack", activePackId).putString("words", vocabulary).putStringSet("selected", selected.toSet())
             .putString("progress", progressJson.toString()).putInt("step", engine.step)
             .putString("previous", engine.previous?.key).putString("mixedPrevious", mixedPrevious?.key).putBoolean("audio", audioEnabled)
             .putBoolean("speakAfterAnswer", speakAfterAnswer).putString("provider", audioProvider).putBoolean("slow", slowAudio).putBoolean("writing", writing)
@@ -325,10 +375,10 @@ class StudyStore(context: Context, userId: String? = null) {
             .putString("before", beforeAnswer?.let { writeProgress(it).toString() })
             .putString("answerUndo", answerUndo?.toString()).putBoolean("answerIgnored", answerIgnored)
             .putString("strokes", strokes)
-            .putString("syncBase", SyncSnapshot.encode(syncBase)).putString("syncRevision", syncRevision)
+            .putString("syncBase", syncBaseText()).putString("syncRevision", syncRevision)
             .putLong("lastSyncedAt", lastSyncedAt).apply()
-        val snapshot = SyncSnapshot.encode(snapshotFromPacks())
-        if (snapshot != lastSyncSnapshot) { lastSyncSnapshot = snapshot; onSyncDataChanged?.invoke() }
+        // Change detection needs only local equality. Canonicalize when sync actually runs.
+        if (packData != lastSyncSnapshot) { lastSyncSnapshot = packData; onSyncDataChanged?.invoke() }
     }
 
     private fun snapshotFromPacks(): Map<String, String> = packs.keys().asSequence().associateWith { SyncSnapshot.pack(packs.getJSONObject(it)) }
@@ -348,7 +398,7 @@ class StudyStore(context: Context, userId: String? = null) {
         if (!packs.has(activePackId)) activePackId = merged.packs.keys.sorted().first()
         if (oldActive != merged.packs[activePackId]) {
             val pack = packs.getJSONObject(activePackId)
-            words = decodeWords(pack.getString("words")).toMutableList()
+            words = decodedWords(pack.getString("words")).toMutableList()
             selected.clear(); selected.addAll(pack.getJSONArray("selected").strings())
             engine.progress.clear()
             val progress = pack.getJSONObject("progress")
@@ -371,7 +421,7 @@ class StudyStore(context: Context, userId: String? = null) {
         session = JSONObject(); mixed = null; mixedPrevious = null
         if (practicePackIds.size == 1) { practicePackIds.clear(); practicePackIds.add(id) }
         val pack = packs.getJSONObject(id)
-        val incoming = decodeWords(pack.getString("words"))
+        val incoming = decodedWords(pack.getString("words"))
         activePackId = id
         words = incoming.toMutableList()
         selected.clear(); selected.addAll(pack.getJSONArray("selected").strings())
@@ -427,7 +477,7 @@ class StudyStore(context: Context, userId: String? = null) {
         packs.keys().asSequence().toList().forEach { packs.remove(it) }
         merged.packs.forEach { (id, text) -> packs.put(id, JSONObject(text)) }
         val active = packs.getJSONObject(activePackId)
-        words = decodeWords(active.getString("words")).toMutableList()
+        words = decodedWords(active.getString("words")).toMutableList()
         selected.clear(); selected.addAll(active.getJSONArray("selected").strings())
         engine.progress.clear()
         val progress = active.getJSONObject("progress")
@@ -465,7 +515,7 @@ class StudyStore(context: Context, userId: String? = null) {
                 "${word.hanzi} ↔ ${other.hanzi} · внутри файла" else null
         } }
         return withinFile + packNames.flatMap { (id, name) ->
-            val existing = decodeWords(packs.getJSONObject(id).getString("words"))
+            val existing = decodedWords(packs.getJSONObject(id).getString("words"))
             incoming.mapNotNull { word ->
                 existing.firstOrNull { old -> old.writtenForms.any { it in word.writtenForms } ||
                     (Answers.pronunciationKey(old) == Answers.pronunciationKey(word) &&
@@ -477,7 +527,7 @@ class StudyStore(context: Context, userId: String? = null) {
 
     fun previewUpdate(incoming: List<Word>, packId: String = activePackId): PackMaintenance.Update {
         incoming.forEach { validate(it) }
-        val existing = if (packId == activePackId) words else decodeWords(packs.getJSONObject(packId).getString("words"))
+        val existing = if (packId == activePackId) words else decodedWords(packs.getJSONObject(packId).getString("words"))
         return PackMaintenance.preview(existing, incoming)
     }
 
@@ -501,13 +551,14 @@ class StudyStore(context: Context, userId: String? = null) {
         val now = System.currentTimeMillis()
         return packNames.map { (id, name) ->
             val pack = packs.getJSONObject(id)
-            val vocabulary = decodeWords(pack.getString("words"))
+            val vocabulary = decodedWords(pack.getString("words"))
             val saved = pack.getJSONObject("progress")
             val progress = saved.keys().asSequence().associateWith { readProgress(saved.getJSONObject(it)) }
             val tasks = LearningEngine().tasks(vocabulary, false, true) + LearningEngine().tasks(vocabulary, true, false)
+            val tasksByWord = tasks.groupBy { it.wordId }
             PackOverview(name, vocabulary.size,
-                vocabulary.count { w -> introductions.has("$id/${w.id}") || Skill.entries.any { (progress[Task(w.id, it).key]?.attempts ?: 0) > 0 } },
-                vocabulary.count { w -> tasks.filter { it.wordId == w.id }.all { progress[it.key]?.mastered == true } },
+                vocabulary.count { w -> introductions.has("$id/${w.id}") || Skill.entries.any { progress[Task(w.id, it).key]?.let { p -> p.attempts > 0 || p.mastered } == true } },
+                vocabulary.count { w -> tasksByWord[w.id].orEmpty().all { progress[it.key]?.mastered == true } },
                 tasks.count { progress[it.key]?.mastered == true },
                 tasks.count { progress[it.key]?.let { p -> p.due > 0 && p.due <= now } == true },
                 tasks.groupBy { it.skill }.mapValues { (_, values) -> values.map { progress[it.key] ?: Progress() } })

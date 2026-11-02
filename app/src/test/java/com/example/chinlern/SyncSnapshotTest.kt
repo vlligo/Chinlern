@@ -19,15 +19,14 @@ class SyncSnapshotTest {
         assertEquals(0, result.conflicts)
     }
 
-    @Test fun concurrentChangesKeepBothVersions() {
+    @Test fun concurrentRenamesUseUploadingValueWithoutCopies() {
         val base = mapOf("a" to pack("Original"))
         val local = mapOf("a" to pack("Phone"))
         val remote = mapOf("a" to pack("Tablet"))
         val result = SyncSnapshot.merge(base, local, remote)
-        assertEquals(remote["a"], result.packs["a"])
-        assertEquals(2, result.packs.size)
-        assertEquals(1, result.conflicts)
-        assertEquals("Phone (копия конфликта)", JSONObject(result.packs.entries.first { it.key != "a" }.value).getString("name"))
+        assertEquals(local["a"], result.packs["a"])
+        assertEquals(1, result.packs.size)
+        assertEquals(0, result.conflicts)
         // Repeating an upload after a crash does not create extra copies.
         assertEquals(result.packs, SyncSnapshot.merge(base, local, result.packs).packs)
     }
@@ -44,12 +43,12 @@ class SyncSnapshotTest {
         assertEquals(mapOf("b" to base.getValue("b")), SyncSnapshot.merge(base, base, base - "a").packs)
     }
 
-    @Test fun editAgainstDeletionBecomesRecoveryCopy() {
+    @Test fun editAgainstDeletionKeepsOriginalIdentity() {
         val base = mapOf("a" to pack("A"), "b" to pack("B"))
         val result = SyncSnapshot.merge(base, base + ("a" to pack("Edited offline")), base - "a")
-        assertFalse(result.packs.containsKey("a"))
+        assertTrue(result.packs.containsKey("a"))
         assertEquals(2, result.packs.size)
-        assertEquals(1, result.conflicts)
+        assertEquals(0, result.conflicts)
         assertTrue(result.packs.values.any { JSONObject(it).getString("name").startsWith("Edited offline") })
     }
 
@@ -58,14 +57,14 @@ class SyncSnapshotTest {
         val remote = base + ("a" to pack("Edited remotely"))
         val result = SyncSnapshot.merge(base, base - "a", remote)
         assertEquals(remote, result.packs)
-        assertEquals(1, result.conflicts)
+        assertEquals(0, result.conflicts)
     }
 
     @Test fun concurrentDeletionsRetainAtLeastOnePack() {
         val base = mapOf("a" to pack("A"), "b" to pack("B"))
         val result = SyncSnapshot.merge(base, base - "a", base - "b")
         assertFalse(result.packs.isEmpty())
-        assertEquals(1, result.conflicts)
+        assertEquals(0, result.conflicts)
     }
 
     @Test fun midFlightEditsSurviveServerResult() {
@@ -74,8 +73,8 @@ class SyncSnapshotTest {
         assertEquals(editedDuringUpload, SyncSnapshot.merge(captured, editedDuringUpload, captured).packs)
         val changedRemotely = mapOf("a" to pack("Tablet answer"))
         val result = SyncSnapshot.merge(captured, editedDuringUpload, changedRemotely)
-        assertEquals(2, result.packs.size)
-        assertEquals(changedRemotely["a"], result.packs["a"])
+        assertEquals(1, result.packs.size)
+        assertEquals(editedDuringUpload["a"], result.packs["a"])
     }
 
     @Test fun selectionAndObjectOrderingDoNotCauseFalseConflicts() {

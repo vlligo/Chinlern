@@ -68,6 +68,7 @@ class ShortSessionTest {
     @Test fun dailyLimitAndPreviewsPersist() {
         var store = StudyStore(context)
         store.dailyNewWords = 3
+        store.beginSession()
         val ids = store.tasks().map { it.wordId }.distinct()
         assertEquals(3, ids.size)
         ids.forEach { id -> store.introduce(store.studyWords.first { it.id == id }) }
@@ -77,6 +78,27 @@ class ShortSessionTest {
         store.dailyNewWords = 0
         assertEquals(ids.toSet(), store.tasks().map { it.wordId }.toSet())
     }
+    @Test fun regularPracticeIncludesEverySelectedUnknownWordRegardlessOfDailyLimit() {
+        val store = StudyStore(context)
+        store.dailyNewWords = 0
+        val expected = store.selected.toSet()
+        assertEquals(expected, store.tasks().map { it.wordId }.toSet())
+        store.writing = true
+        assertEquals(expected, store.tasks().map { it.wordId }.toSet())
+        store.beginSession()
+        assertTrue(store.tasks().isEmpty())
+        store.leaveSession()
+        assertEquals(expected, store.tasks().map { it.wordId }.toSet())
+    }
+
+    @Test fun explicitFocusCanIntroduceWordsAfterDailyBudgetIsExhausted() {
+        val store = StudyStore(context)
+        store.dailyNewWords = 0
+        val task = Task(store.words.last().id, Skill.CHARACTER_PINYIN)
+        store.beginSession(focus = listOf(task))
+        assertEquals(listOf(task), store.tasks())
+    }
+
     @Test fun focusCanPractiseMasteredWritingAndKnowledgeWithoutResettingProgress() {
         val store = StudyStore(context)
         val id = store.studyWords.first().id
@@ -90,6 +112,27 @@ class ShortSessionTest {
         store.choosePracticePacks(setOf(store.activePackId))
         assertFalse(store.shortSession)
     }
+    @Test fun cachedVocabularyStillPersistsEditsAndOnlyNotifiesForLibraryChanges() {
+        val store = StudyStore(context)
+        store.save()
+        var notifications = 0
+        store.onSyncDataChanged = { notifications++ }
+        store.route = "settings"
+        store.save()
+        assertEquals(0, notifications)
+        val original = store.words.first()
+        store.words[0] = original.copy(hint = "Updated hint")
+        store.save()
+        assertEquals(1, notifications)
+        assertEquals("Updated hint", StudyStore(context).words.first().hint)
+        store.save()
+        assertEquals(1, notifications)
+        store.current = Task(original.id, Skill.CHARACTER_PINYIN)
+        store.recordAnswer(true)
+        assertEquals(2, notifications)
+        assertTrue(StudyStore(context).engine.state(store.current!!).mastered)
+    }
+
     @Test fun expiredSessionDoesNotScheduleAnotherQuestion() {
         val store = StudyStore(context)
         store.beginSession(minutes = true)

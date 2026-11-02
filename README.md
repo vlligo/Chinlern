@@ -32,7 +32,11 @@ Open **Набор → Добавить набор** (also available under **Сл
 The app accepts plain JSON and a response with one JSON code block. Invalid content stays in the editor so you can correct it; per-card errors include the card number. Multiple code blocks, trailing text after plain JSON, invalid tones, and oversized input are rejected. The app does not send data to an LLM itself. Review model-generated meanings and pronunciation before practising.
 
 
-Use **Набор → Добавить набор → Или выбрать файл** on the learning or words screen. Each file becomes a new named pack with independent word selection and progress, even if another pack contains the same words. Your existing vocabulary and results are retained in **Мои слова**. Select one or more packs with **Наборы для практики** on either **Учить** or **Слова**. **Управление набором** lets you choose a pack to rename or delete; the last pack cannot be deleted. **＋ Добавить** adds a word to the current pack.
+Use **Набор → Добавить набор → Или выбрать файлы / ZIP** on the learning or words screen. Each file becomes a new named pack with independent word selection and progress, even if another pack contains the same words. Your existing vocabulary and results are retained in **Мои слова**. Select one or more packs with **Наборы для практики** on either **Учить** or **Слова**. **Управление набором** lets you choose a pack to rename or delete; the last pack cannot be deleted. **＋ Добавить** adds a word to the current pack.
+
+Select several files at once, or a ZIP containing `.json` / `.txt` packs (including subfolders). The batch preview lists each pack and its word count; uncheck any packs you do not want. Invalid packs are reported by filename without blocking valid ones. Files are read in the background directly from Android storage providers, regardless of their reported MIME type. Limits per selection: 100 files/archive entries, 20 MB total expanded data, and 2 MB per entry. Nested archives are not imported. Archive size/count limit failures stop reading that archive; previously validated packs remain available for review.
+
+Leading uppercase Latin initialisms are supported in mixed words, for example `CD pán` / `CD pan2` for CD盘. Chinese syllables still require matching tones.
 
 Save a UTF-8 text file with a `.json` extension. Minimal example:
 
@@ -54,6 +58,12 @@ Older JSON arrays and files with `version` and `words` also work. A name can be 
 
 JSON export contains vocabulary and accepted synonyms, not study results. Progress and unfinished questions persist locally, including typed answers, tone selections, feedback and drawing strokes. Android's standard backup rules also apply. Uninstalling the app can remove local data.
 
+## Mark words you already know
+
+On **Слова**, each word has independent **Узнаю слово** (recognition/knowledge exercises) and **Умею писать** (writing from memory) checkboxes. Marking a category masters its skills without adding attempts or deleting error history. Newly marked skills are scheduled for review in one day; already-mastered skills retain their review date. Unchecking makes that category available to study again. A wrong practice answer can also remove mastery.
+
+Marks apply to that word in that pack. They persist across restarts and use the existing progress sync and full-library backup. Known words bypass the new-word preview/daily introduction limit. Vocabulary-only JSON export still excludes progress.
+
 ## Optional account sync
 
 Open **Настройки → Аккаунт и синхронизация** to create an email/password account or sign in. Registration automatically sends a Firebase verification link in Russian. Follow the link and return to the app; verification is refreshed on return or with **Я подтвердил почту**. Failed email delivery leaves the created account usable locally, with a resend button and a one-minute resend cooldown. Existing unverified accounts must also verify before syncing. Use the same account on each device.
@@ -64,7 +74,7 @@ Sync starts off for accounts that have never unlocked it. The separate access pa
 
 Packs, vocabulary, accepted synonyms, selections, knowledge and writing progress, and review dates sync. Voice settings, navigation and unfinished answers/drawings remain local. Practice works without a connection. Changes sync after a short delay while the app is running, when it returns to the foreground, or with **Синхронизировать сейчас**, only while sync is enabled and email is verified. Failed syncs preserve local data and retry with backoff; Android need not keep a stopped app running.
 
-Sync stores compressed current state, not an ever-growing answer history. Independent pack changes merge. When both devices change the same pack since their last shared state, both versions survive: the cloud version keeps its identity and the other becomes **копия конфликта**. Progress is not automatically added together across those versions. A deletion conflicting with an edit preserves the edited version for review. If a device edits data during upload, those new changes are retained for the next sync. Server transactions prevent partial or conflicting snapshot uploads. Successful sync and its local baseline are saved together.
+Sync stores compressed current state, not an ever-growing answer history. Concurrent app changes merge within the original pack by word, field, selection and skill; sync no longer creates conflict-copy packs. Independent vocabulary edits and skill results survive together. A simultaneous edit to the exact same scalar field uses the uploading value. A concurrent deletion versus an edit retains the edited item. For simultaneous changes to one skill, attempts/errors/confusions use maxima (snapshots lack unique answer IDs, so summing would double-count shared history); disputed mastery remains unmastered. Retry merges do not inflate counters. Queue delays are rebased to the merged step. Existing conflict copies are left intact because older copies do not record their source pack. If a device edits data during upload, those changes are retained for the next sync. Server transactions prevent partial snapshot uploads. Successful sync and its local baseline are saved together.
 
 Storage is bounded to 8 MB compressed / 32 MB expanded per account, split into documents below Firestore's document limit. Exceeding this limit reports an error and retains local data. Snapshots overwrite prior chunks and remove surplus chunks; reading/uploading a changed library transfers the current snapshot, so very large libraries or many users may reach Firebase's bandwidth or operation quotas. There is no permanent activity log or paid Cloud Functions dependency.
 
@@ -237,3 +247,9 @@ Wrong character choices are saved per word and skill, included in backups and sy
 Progress includes a library-wide overview of introduced words, learned words, mastered skills, due reviews, and difficulties by skill. A learned word has all applicable skills mastered, including writing and audio. Counts are per pack; repeated vocabulary in separate packs is counted separately.
 
 Import previews warn about likely duplicates within the file and across packs. Choose “Обновить существующий набор…” to review additions and before/after card changes. Updates match the same hanzi to existing local IDs, preserve progress and selection, and retain words omitted from the file. Reusing an ID for a different word is rejected to prevent transferring unrelated progress.
+
+### Pack order and tablet typing
+
+All pack lists use alphabetical ordering, ignoring case, including practice selection, editing, update targets, and library summaries. Sorting retains pack IDs, selection, and progress.
+
+When the tablet keyboard is open during an exercise, a compact copy of the question stays above the scrolling answer area. Listening prompts retain a replay button. The answer field and fixed submit controls remain above the keyboard in portrait and landscape.

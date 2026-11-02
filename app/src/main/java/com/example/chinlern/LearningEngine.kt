@@ -27,6 +27,12 @@ enum class Skill(val title: String, val instruction: String) {
     WRITING("Написание", "Напишите по памяти, затем сравните")
 }
 
+/** The two independently adjustable groups shown in the word library. */
+enum class WordKnowledge(val title: String) {
+    RECOGNITION("Узнаю слово"), WRITING("Умею писать");
+    val skills: List<Skill> get() = Skill.entries.filter { (it == Skill.WRITING) == (this == WRITING) }
+}
+
 data class Task(val wordId: String, val skill: Skill) { val key get() = "$wordId:${skill.name}" }
 data class Progress(
     var attempts: Int = 0, var errors: Int = 0, var streak: Int = 0,
@@ -79,7 +85,14 @@ object Answers {
 
     // Compare syllable by syllable; an omitted non-neutral tone never silently passes.
     fun pinyinMatches(input: String, expected: String): Boolean {
-        val source = Normalizer.normalize(input, Normalizer.Form.NFC).lowercase(Locale.ROOT).trim().replace("u:", "ü").replace('v', 'ü')
+        // A leading Latin initialism (CD盘, USB接口) has no Mandarin tone.
+        val initialism = Regex("^[A-Z]{2,}(?=\\s)").find(expected.trim())?.value
+        val expectedPinyin = if (initialism != null) expected.trim().removePrefix(initialism).trim() else expected
+        val inputPinyin = if (initialism != null) {
+            if (!input.trim().startsWith(initialism, ignoreCase = true)) return false
+            input.trim().drop(initialism.length).trim()
+        } else input
+        val source = Normalizer.normalize(inputPinyin, Normalizer.Form.NFC).lowercase(Locale.ROOT).trim().replace("u:", "ü").replace('v', 'ü')
             .replace(Regex("[\\s'’·-]"), "")
         val letters = mutableListOf<Pair<Char, Int?>>()
         for (c in source) {
@@ -97,7 +110,7 @@ object Answers {
             if (base !in 'a'..'z' && base != 'ü') return false
             letters.add(base to tone)
         }
-        val normalized = expected.lowercase(Locale.ROOT).replace("u:", "ü").replace('v', 'ü')
+        val normalized = expectedPinyin.lowercase(Locale.ROOT).replace("u:", "ü").replace('v', 'ü')
         val syllables = Regex("([a-zü]+)([1-5])").findAll(normalized).toList()
         if (syllables.isEmpty() || syllables.joinToString("") { it.value } != normalized.replace(" ", "")) return false
         var cursor = 0
@@ -124,7 +137,19 @@ class LearningEngine(val progress: MutableMap<String, Progress> = mutableMapOf()
     var step = 0
     var previous: Task? = null
     fun state(task: Task) = progress.getOrPut(task.key) { Progress() }
+    private var taskWords: List<Word> = emptyList()
+    private val taskCache = mutableMapOf<Pair<Boolean, Boolean>, List<Task>>()
+
     fun tasks(words: List<Word>, writing: Boolean, audio: Boolean): List<Task> {
+        if (taskWords != words) {
+            taskWords = words.toList()
+            taskCache.clear()
+        }
+        return taskCache.getOrPut(writing to audio) { buildTasks(words, writing, audio) }
+    }
+
+    private fun buildTasks(words: List<Word>, writing: Boolean, audio: Boolean): List<Task> {
+        if (writing) return words.map { Task(it.id, Skill.WRITING) }
         val sounds = words.groupingBy { Answers.pronunciationKey(it) }.eachCount()
         val meanings = mutableMapOf<String, MutableSet<String>>()
         words.forEach { w -> w.meanings.forEach { meanings.getOrPut(Answers.meaning(it)) { mutableSetOf() }.add(w.id) } }
@@ -172,6 +197,19 @@ class LearningEngine(val progress: MutableMap<String, Progress> = mutableMapOf()
             p.due = 0
         }
         p.nextAt = step + delay
+    }
+    /** Manual assessment changes mastery, never fabricates answers or erases history. */
+    fun setKnown(wordId: String, category: WordKnowledge, known: Boolean, now: Long = System.currentTimeMillis()) {
+        category.skills.forEach { skill ->
+            val p = state(Task(wordId, skill))
+            if (p.mastered != known) {
+                p.mastered = known
+                p.streak = 0
+                p.nextAt = step
+                p.interval = if (known) 1 else 0
+                p.due = if (known) now + 86_400_000L else 0
+            }
+        }
     }
     fun restart(tasks: List<Task>, dueOnly: Boolean = false, now: Long = System.currentTimeMillis()) {
         tasks.forEach { task ->

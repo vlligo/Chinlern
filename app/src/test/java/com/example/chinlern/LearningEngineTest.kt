@@ -6,6 +6,23 @@ import kotlin.random.Random
 
 class LearningEngineTest {
     private val water = Word("water", "水", "shuǐ", "shui3", listOf("вода", "влага"), listOf("永", "冰", "泳", "水", "氵"), alternatives = listOf("氵"))
+    @Test fun cachedTasksTrackInPlaceVocabularyChangesAndModeSwitches() {
+        val engine = LearningEngine()
+        val words = mutableListOf(water)
+        val initial = engine.tasks(words, false, true)
+        assertSame(initial, engine.tasks(words, false, true))
+        assertEquals(listOf(Task(water.id, Skill.WRITING)), engine.tasks(words, true, false))
+        assertFalse(engine.tasks(words, false, false).any { it.skill == Skill.AUDIO_CHARACTER })
+        words.add(water.copy(id = "homophone", hanzi = "氵"))
+        val ambiguous = engine.tasks(words, false, true)
+        assertFalse(ambiguous.any { it.skill == Skill.PINYIN_CHARACTER })
+        assertEquals(setOf("water", "homophone"), ambiguous.map { it.wordId }.toSet())
+        words.removeAt(1)
+        assertEquals(initial, engine.tasks(words, false, true))
+        words[0] = water.copy(id = "replacement")
+        assertEquals(setOf("replacement"), engine.tasks(words, false, true).map { it.wordId }.toSet())
+    }
+
     @Test fun markedAndNumberedPinyinAreEquivalent() {
         listOf("shuǐ", "shui3", " SHUǏ ", "shui\u030c").forEach { assertTrue(it, Answers.pinyinMatches(it, "shui3")) }
         listOf("shui", "shui2", "shuí", "shuǐ2", "shui33", "sui3").forEach { assertFalse(it, Answers.pinyinMatches(it, "shui3")) }

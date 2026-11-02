@@ -3,7 +3,6 @@ package com.example.chinlern
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
-import java.security.MessageDigest
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
@@ -41,40 +40,24 @@ object SyncSnapshot {
         return canonical(copy)
     }
 
-    /** Three-way merge; concurrent edits to one pack preserve the local version as a copy. */
+    /** Merge app edits within the original pack; never create conflict-copy packs. */
     fun merge(base: Map<String, String>, local: Map<String, String>, remote: Map<String, String>): Merge {
         val result = linkedMapOf<String, String>()
-        val copies = linkedMapOf<String, String>()
-        var conflicts = 0
         (base.keys + local.keys + remote.keys).sorted().forEach { id ->
             val b = base[id]; val l = local[id]; val r = remote[id]
             val chosen = when {
                 l == r -> l
                 l == b -> r
                 r == b -> l
-                else -> {
-                    conflicts++
-                    if (l != null && l != r) {
-                        val digest = MessageDigest.getInstance("SHA-256")
-                            .digest("$id\n$b\n$l\n$r".toByteArray(Charsets.UTF_8))
-                            .joinToString("") { "%02x".format(it) }.take(32)
-                        val copy = JSONObject(l)
-                        copy.put("name", copy.getString("name").take(59) + " (копия конфликта)")
-                        copies["conflict-$digest"] = pack(copy)
-                    }
-                    r
-                }
+                l == null -> r
+                r == null -> l
+                else -> PackSyncMerge.merge(b, l, r)
             }
             if (chosen != null) result[id] = chosen
         }
-        result.putAll(copies)
-        // Two devices can each delete a different last-but-one pack. Preserve a recovery copy.
-        if (result.isEmpty() && local.isNotEmpty()) {
-            val entry = local.entries.sortedBy { it.key }.first()
-            result[entry.key] = entry.value
-            conflicts++
-        }
-        return Merge(result, conflicts)
+        // Concurrent deletion of different packs must not leave an unusable empty library.
+        if (result.isEmpty()) (local + remote).entries.minByOrNull { it.key }?.let { result[it.key] = it.value }
+        return Merge(result, 0)
     }
 
     fun compress(packs: Map<String, String>): List<ByteArray> {

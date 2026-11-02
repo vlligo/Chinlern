@@ -135,19 +135,16 @@ class FirebaseSyncTest {
             phoneStore.engine.answer(task, false, delay = 4); phoneStore.save()
             tabletStore.engine.answer(task, true, delay = 4); tabletStore.save()
             assertEquals(0, sync(phoneStore, phone))
-            assertEquals(1, sync(tabletStore, tablet))
-            assertEquals(2, tabletStore.packNames.size)
+            assertEquals(0, sync(tabletStore, tablet))
+            assertEquals(1, tabletStore.packNames.size)
             assertEquals(0, sync(phoneStore, phone))
             assertEquals(phoneStore.syncSnapshot(), tabletStore.syncSnapshot())
-            val errors = phoneStore.packNames.map { (id, _) ->
-                phoneStore.switchPack(id)
-                assertEquals(2, phoneStore.engine.state(task).attempts)
-                phoneStore.engine.state(task).errors
-            }.sorted()
-            assertEquals(listOf(1, 2), errors)
+            assertEquals(2, phoneStore.engine.state(task).attempts)
+            assertEquals(2, phoneStore.engine.state(task).errors)
+            assertFalse(phoneStore.engine.state(task).mastered)
             // Repeating sync must neither add copies nor increment attempts.
             assertEquals(0, sync(phoneStore, phone))
-            assertEquals(2, phoneStore.packNames.size)
+            assertEquals(1, phoneStore.packNames.size)
             assertEquals(phoneStore.syncSnapshot(), StudyStore(context, phoneId).syncSnapshot())
         } finally {
             SyncAccess(context).disable()

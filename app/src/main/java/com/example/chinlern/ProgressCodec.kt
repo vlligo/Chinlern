@@ -27,8 +27,13 @@ object ProgressCodec {
         require(j.getInt("version") == 6) { "Неподдерживаемая версия расписания повторений." }
         val history = j.getJSONArray("history")
         require(history.length() <= Fsrs.HISTORY_LIMIT) { "Слишком длинная история повторений." }
-        return Fsrs.Memory(j.getDouble("stability"), j.getDouble("difficulty"), Fsrs.Phase.valueOf(j.getString("phase")),
-            j.getInt("learningStep"), j.getLong("lastReview"), j.getLong("updatedAt"), j.getString("revision"),
+        val phase = Fsrs.Phase.valueOf(j.getString("phase"))
+        val storedStep = j.getInt("learningStep")
+        // Earlier legacy migration left mastered cards at learning step 1.
+        // The step is unused in REVIEW; repair it without changing the schedule or history.
+        val step = if (phase == Fsrs.Phase.REVIEW && storedStep == 1) 0 else storedStep
+        return Fsrs.Memory(j.getDouble("stability"), j.getDouble("difficulty"), phase,
+            step, j.getLong("lastReview"), j.getLong("updatedAt"), j.getString("revision"),
             (0 until history.length()).map { i -> history.getJSONArray(i).let {
                 require(it.length() == 4)
                 Fsrs.Review(it.getString(0), it.getLong(1), it.getInt(2), it.getInt(3))

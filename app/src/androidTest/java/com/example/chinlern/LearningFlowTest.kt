@@ -18,6 +18,31 @@ import org.junit.runner.RunWith
 class LearningFlowTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
     @Before fun resetTestData() { context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit() }
+    @Test fun restoredFeedbackDropsUnavailableListeningQuestionWithoutChangingProgress() {
+        val store = StudyStore(context)
+        val word = Word("there", "那儿", "nàr", "nar4", listOf("там"), listOf("水", "木", "火"))
+        store.importPack("Listening regression", listOf(word))
+        store.introduce(word)
+        store.audioProvider = "system"
+        val task = Task(word.id, Skill.AUDIO_MEANING)
+        assertTrue(task in store.tasks())
+        store.current = task
+        store.recordAnswer(true)
+        val progress = store.studyEngine.state(task).copy()
+        store.audioProvider = "hanping"
+        store.route = "quiz"
+        store.save()
+        assertEquals(true, StudyStore(context).feedback)
+        assertFalse(task in StudyStore(context).tasks())
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity {
+                val restored = StudyStore(context)
+                assertNotEquals(task, restored.current)
+                assertNull(restored.feedback)
+                assertEquals(progress, restored.studyEngine.state(task))
+            }
+        }
+    }
     @Test fun seedDeckAndProgressSurviveReload() {
         val store = StudyStore(context)
         assertEquals(16, store.words.size)

@@ -17,6 +17,28 @@ import org.junit.runner.RunWith
 /** Explicit opt-in only. No reset, account operations, word edits or selection changes. */
 @RunWith(AndroidJUnit4::class)
 class PhoneSmokeTest {
+    @Test fun listeningQueueSkipsUnavailableHanpingRecordings() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("phoneSmoke") == "true")
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val userId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+        val data = StudyStore(context, userId)
+        val originalProvider = data.audioProvider
+        val audio = setOf(Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER)
+        val unavailable = data.studyWords.filter { !ListeningAvailability.allows(it, "hanping") }.map { it.id }.toSet()
+        assertTrue("The selected library must contain unavailable recordings for this regression check", unavailable.isNotEmpty())
+        try {
+            // Only change the in-memory value; never save settings or learning results.
+            data.audioProvider = "system"
+            val systemTasks = data.tasks()
+            data.audioProvider = "hanping"
+            val hanpingTasks = data.tasks()
+            assertFalse(hanpingTasks.any { it.skill in audio && it.wordId in unavailable })
+            assertEquals(systemTasks.filterNot { it.skill in audio && it.wordId in unavailable }, hanpingTasks)
+            assertEquals(systemTasks.filter { it.skill !in audio }, hanpingTasks.filter { it.skill !in audio })
+            android.util.Log.i("ListeningQueueSmoke", "PASS: unavailable words=${unavailable.size}, excluded listening tasks=${systemTasks.size - hanpingTasks.size}, selected provider=$originalProvider")
+        } finally { data.audioProvider = originalProvider }
+    }
+
     @Test fun inspectWordsAndPickerWithoutChangingLibrary() {
         assumeTrue(InstrumentationRegistry.getArguments().getString("phoneSmoke") == "true")
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->

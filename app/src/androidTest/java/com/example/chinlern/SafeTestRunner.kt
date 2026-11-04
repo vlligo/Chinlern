@@ -10,7 +10,8 @@ class SafeTestRunner : AndroidJUnitRunner() {
         val emulator = Build.HARDWARE in setOf("ranchu", "goldfish") ||
             Build.FINGERPRINT.startsWith("generic") || Build.MODEL.startsWith("sdk_gphone")
         val readOnlyPhoneSmoke = arguments.getString("phoneSmoke") == "true" &&
-            arguments.getString("class") == "com.example.chinlern.PhoneSmokeTest"
+            arguments.getString("class") in setOf("com.example.chinlern.PhoneSmokeTest",
+                "com.example.chinlern.PhoneSmokeTest#listeningQueueSkipsUnavailableHanpingRecordings")
         check(emulator || readOnlyPhoneSmoke) {
             "Data-resetting tests are restricted to emulators. The personal-device library was not touched."
         }

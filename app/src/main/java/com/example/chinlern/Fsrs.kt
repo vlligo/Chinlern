@@ -51,7 +51,7 @@ object Fsrs {
         val stability = if (p.interval > 0) p.interval.toDouble() else w[0]
         val last = if (p.due > 0 && p.interval > 0) (p.due - p.interval * DAY).coerceIn(0L, now) else now
         return Memory(stability, 5.0, if (p.mastered) Phase.REVIEW else Phase.LEARNING,
-            if (p.streak > 0) 1 else 0, last, last, "legacy")
+            if (!p.mastered && p.streak > 0) 1 else 0, last, last, "legacy")
     }
     fun schedule(previous: Memory?, rating: Rating, now: Long, retention: Double = 0.9,
                  reviewId: String = UUID.randomUUID().toString()): Scheduled {

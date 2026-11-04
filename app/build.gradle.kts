@@ -27,8 +27,8 @@ android {
         applicationId = "com.example.chinlern"
         minSdk = 24
         targetSdk = 37
-        versionCode = 5
-        versionName = "2.2"
+        versionCode = 6
+        versionName = "2.2.1"
         buildConfigField("String", "SYNC_PASSWORD_SHA256", "\"$syncVerifier\"")
 
         testInstrumentationRunner = "com.example.chinlern.SafeTestRunner"

@@ -1,13 +1,9 @@
-# Chinlearn 2.2
+# Chinlearn 2.2.1
 
-- Adaptive reviews: FSRS scheduling adjusts review intervals to your answers and the time since your last review. Choose a retention target of 85%, 90%, or 95% in Settings.
-- Due reviews appear automatically when you start studying. Learning and relearning tasks come first, followed by scheduled reviews and new skills.
-- New prompts for the same word wait ten minutes after an answer to reduce answer leakage. Short sessions can finish before ten questions when nothing else is due.
-- Unfinished sessions refresh the next day or after four hours without practice, keeping recorded progress and review dates.
-- The daily new-word limit now applies to regular practice as well as short sessions. Focused drills can still include explicitly selected skills.
-- Hanping listening practice skips unverified erhua recordings that could produce misleading audio. Device speech keeps those tasks available.
-- Screen navigation saves less data, reducing unnecessary work with large vocabulary libraries.
+- Fixed an invalid review state when previously mastered skills with a correct-answer streak moved to the adaptive scheduler.
+- Saved review states affected by that migration are repaired when read, preserving review dates, counters, and recent review history.
+- Restored questions are checked against the current practice queue even when an answer is already displayed. Questions that are no longer eligible, including unavailable Hanping listening prompts after a voice change, are cleared.
 
-Existing progress is preserved and moves to the new scheduler when you next answer each skill. Backups and cloud sync include the new review state and recent review history; undo restores the previous state.
+Install this update over the existing app using the same signing key to keep local data. Export a full backup in Settings before updating.
 
-**If you use cloud sync, update all your devices.** Older versions cannot accept review intervals longer than 30 days.
+**If you use cloud sync, update all your devices.** Versions before 2.2 cannot accept review intervals longer than 30 days.

@@ -492,7 +492,8 @@ class MainActivity : AppCompatActivity() {
     private fun quiz() {
         if (store.sessionFinished && store.feedback == null) { shortResults(); return }
         val tasks = store.tasks()
-        if (store.feedback == null && store.current != null && store.current !in tasks) store.clearQuestion()
+        // Recheck restored questions too, including completed prompts saved before a voice change or update.
+        if (store.current != null && store.current !in tasks) store.clearQuestion()
         if (tasks.isEmpty()) {
             heading("На сегодня всё", "Нет доступных заданий. Выберите слова или измените дневной лимит новых слов в настройках.")
             if (store.shortSession) content.add(button("Результаты занятия") { store.endSession(); render() }, 12)

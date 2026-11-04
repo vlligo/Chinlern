@@ -73,6 +73,26 @@ class SrsPersistenceTest {
         json.getJSONObject("srs").put("stability", -1)
         ProgressCodec.read(json)
     }
+    @Test fun masteredLegacyCardWithStreakRemainsReadableAfterReview() {
+        val legacy = Progress(attempts = 9, errors = 2, streak = 3, mastered = true, due = now, interval = 7)
+        assertEquals(0, Fsrs.migrate(legacy, now)!!.learningStep)
+        val engine = LearningEngine(mutableMapOf(task.key to legacy))
+        engine.answer(task, true, now)
+        val reviewed = engine.state(task)
+        ProgressCodec.validate(reviewed)
+        assertEquals(reviewed, ProgressCodec.read(ProgressCodec.write(reviewed)))
+    }
+    @Test fun repairsPreviouslySavedReviewStepWithoutLosingProgress() {
+        val engine = LearningEngine()
+        engine.answer(task, Fsrs.Rating.EASY, now)
+        val expected = engine.state(task)
+        val json = ProgressCodec.write(expected)
+        json.getJSONObject("srs").put("learningStep", 1)
+        val repaired = ProgressCodec.read(json)
+        ProgressCodec.validate(repaired)
+        assertEquals(expected, repaired)
+        StudyStore.validateSyncPacks(mapOf("p" to pack(repaired)))
+    }
     @Test(expected = IllegalArgumentException::class)
     fun contradictoryPhaseRejected() {
         val e = LearningEngine(); e.answer(task, true, now)

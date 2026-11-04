@@ -275,3 +275,9 @@ Memory state, due date and recent history travel together through local saves, f
 
 
 Version 2.2 validation: Gradle debug and release APK builds, debug lint, and Android instrumentation-test source compilation pass. All 84 JVM tests pass, covering reference-equation numerical values, long absences, learning and relearning, retention, sibling spacing, migration, bounded history, backup round-trips and atomic/retry-safe sync. Lint reports 28 warnings and no errors. Android regression tests cover store reload, exact undo, duplicate submission, daily refresh and early session completion; they have been compiled but not run on an emulator. Screen redraws now save only screen state instead of serializing the complete library and its review histories.
+
+### Version 2.2.1 fixes
+
+Previously mastered skills with a correct-answer streak now migrate with a valid review state. Loading also repairs the unused learning step in affected saved review records without changing counters, due dates, or recent history. Restored questions are rechecked against current eligibility even when feedback is visible, clearing unavailable listening prompts after a voice change.
+
+Validation: debug, unsigned release, and instrumentation APK builds pass; all 86 JVM tests pass. Debug lint reports 28 warnings and no errors. All 22 focused Android tests pass on the API 37 emulator, covering review persistence, exact undo, duplicate submissions, learning flows, session refresh, Hanping request cancellation, and clearing restored unavailable listening feedback while preserving progress. The public-file credential check passes. Signing and distribution remain separate steps; see [PUBLISHING.md](PUBLISHING.md).

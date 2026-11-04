@@ -23,6 +23,7 @@ class LearningFlowTest {
         assertEquals(16, store.words.size)
         store.words.forEach { StudyStore.validate(it) }
         val task = Task("water", Skill.CHARACTER_MEANING)
+        store.introduce(store.words.first { it.id == "water" })
         store.engine.answer(task, false, delay = 5)
         store.current = task; store.feedback = false; store.draft = "тест"; store.beforeAnswer = Progress()
         store.save()
@@ -64,7 +65,7 @@ class LearningFlowTest {
             onView(withText("Показать ответ")).check(matches(isCompletelyDisplayed())).perform(click())
             scenario.recreate()
             onView(withText("Помню")).check(matches(isCompletelyDisplayed())).perform(click())
-            assertTrue(StudyStore(context).engine.state(Task("water", Skill.WRITING)).mastered)
+            assertEquals(Fsrs.Phase.LEARNING, StudyStore(context).engine.state(Task("water", Skill.WRITING)).memory!!.phase)
             assertFalse(StudyStore(context).engine.state(Task("water", Skill.CHARACTER_MEANING)).mastered)
         }
     }
@@ -75,7 +76,7 @@ class LearningFlowTest {
         ActivityScenario.launch(MainActivity::class.java).use {
             onView(withText("shuǐ")).check(doesNotExist())
             onView(withText("3   mǎ  · нисходяще-восходящий")).perform(scrollTo(), click())
-            assertTrue(StudyStore(context).engine.state(Task("water", Skill.CHARACTER_TONE)).mastered)
+            assertEquals(Fsrs.Phase.LEARNING, StudyStore(context).engine.state(Task("water", Skill.CHARACTER_TONE)).memory!!.phase)
         }
     }
     @Test fun audioPromptKeepsMeaningAndHanziHidden() {
@@ -97,7 +98,7 @@ class LearningFlowTest {
         store.replaceWords(listOf(store.words.first { it.id == "water" }.copy(meanings = listOf("вода", "водичка"))))
         val restored = StudyStore(context)
         assertFalse(restored.engine.state(water).mastered)
-        assertTrue(restored.engine.state(fire).mastered)
+        assertEquals(Fsrs.Phase.LEARNING, restored.engine.state(fire).memory!!.phase)
         assertEquals(16, restored.words.size)
     }
     @Test fun malformedImportIsRejected() {

@@ -38,7 +38,8 @@ data class Progress(
     var attempts: Int = 0, var errors: Int = 0, var streak: Int = 0,
     var mastered: Boolean = false, var nextAt: Int = 0, var due: Long = 0,
     var interval: Int = 0,
-    var confusions: Map<String, Int> = emptyMap()
+    var confusions: Map<String, Int> = emptyMap(),
+    var memory: Fsrs.Memory? = null
 )
 
 object Answers {
@@ -136,6 +137,7 @@ object Answers {
 class LearningEngine(val progress: MutableMap<String, Progress> = mutableMapOf()) {
     var step = 0
     var previous: Task? = null
+    fun peek(task: Task): Progress = progress[task.key] ?: Progress()
     fun state(task: Task) = progress.getOrPut(task.key) { Progress() }
     private var taskWords: List<Word> = emptyList()
     private val taskCache = mutableMapOf<Pair<Boolean, Boolean>, List<Task>>()
@@ -164,48 +166,77 @@ class LearningEngine(val progress: MutableMap<String, Progress> = mutableMapOf()
         }.map { Task(word.id, it) }
         }
     }
-    fun next(tasks: List<Task>, random: Random = Random.Default): Task? {
-        val remaining = tasks.filter { !state(it).mastered }
-        if (remaining.isEmpty()) return null
-        val ready = remaining.filter { state(it).nextAt <= step }
-        // At the end, mastered tasks provide spacing instead of immediately repeating a failure.
-        val candidates = if (ready.isEmpty()) tasks.filter { state(it).mastered } else ready
-        val pool = candidates.ifEmpty { remaining }
-        val differentSkill = pool.filter { it.skill != previous?.skill }.ifEmpty { pool }
-        val differentWord = differentSkill.filter { it.wordId != previous?.wordId }.ifEmpty { differentSkill }
-        return differentWord.random(random)
+    /** Due means wall-clock due, independent of the session and the learned indicator. */
+    fun isDue(task: Task, now: Long = System.currentTimeMillis()): Boolean =
+        (progress[task.key]?.due ?: 0L) <= now
+
+    /** Delay unseen sibling prompts after an answer exposed the same word's solution. O(n). */
+    fun dueSchedule(tasks: List<Task>): Map<Task, Long> {
+        val lastWordReview = mutableMapOf<String, Long>()
+        progress.forEach { (key, p) ->
+            p.memory?.history?.lastOrNull()?.at?.let { at ->
+                val wordId = key.substringBefore(':')
+                lastWordReview[wordId] = maxOf(lastWordReview[wordId] ?: 0L, at)
+            }
+        }
+        return tasks.associateWith { task ->
+            val p = progress[task.key]
+            val unseen = p == null || (p.attempts == 0 && !p.mastered && p.memory == null)
+            val siblingDue = if (unseen) lastWordReview[task.wordId]?.let { it + 600_000L } ?: 0L else 0L
+            maxOf(p?.due ?: 0L, siblingDue)
+        }
     }
-    fun answer(task: Task, correct: Boolean, now: Long = System.currentTimeMillis(), delay: Int = Random.nextInt(4, 8)) {
+
+    fun next(tasks: List<Task>, random: Random = Random.Default, now: Long = System.currentTimeMillis()): Task? {
+        val due = dueSchedule(tasks).filterValues { it <= now }.keys.toList()
+        if (due.isEmpty()) return null
+        // Learning/relearning first, then scheduled reviews, then never-attempted skills.
+        fun priority(t: Task): Int {
+            val p = progress[t.key] ?: return 2
+            return when {
+                p.memory?.phase == Fsrs.Phase.LEARNING || p.memory?.phase == Fsrs.Phase.RELEARNING -> 0
+                p.attempts > 0 || p.mastered -> 1
+                else -> 2
+            }
+        }
+        val best = due.minOf(::priority)
+        val candidates = due.filter { priority(it) == best }
+        val otherWords = candidates.filter { it.wordId != previous?.wordId }.ifEmpty { candidates }
+        if (best < 2) return otherWords.minWithOrNull(compareBy<Task> { progress[it.key]?.due ?: 0L }.thenBy { it.key })
+        val otherSkills = otherWords.filter { it.skill != previous?.skill }.ifEmpty { otherWords }
+        return otherSkills.random(random)
+    }
+    @Suppress("UNUSED_PARAMETER") // Kept for compatibility with older callers; spacing now uses real time.
+    fun answer(task: Task, correct: Boolean, now: Long = System.currentTimeMillis(), delay: Int = 0,
+               retention: Double = 0.9) = answer(task, if (correct) Fsrs.Rating.GOOD else Fsrs.Rating.AGAIN, now, retention)
+
+    fun answer(task: Task, rating: Fsrs.Rating, now: Long = System.currentTimeMillis(), retention: Double = 0.9) {
         val p = state(task)
+        val scheduled = Fsrs.schedule(Fsrs.migrate(p, now), rating, now, retention)
         p.attempts++
         step++
         previous = task
-        if (correct) {
-            p.streak++
-            if (p.streak >= if (p.errors > 0) 2 else 1) {
-                if (!p.mastered) {
-                    p.interval = if (p.interval == 0) 1 else (p.interval * 2 + 1).coerceAtMost(30)
-                    p.due = now + p.interval * 86_400_000L
-                }
-                p.mastered = true
-            }
-        } else {
-            p.errors++
-            p.streak = 0
-            p.mastered = false
-            p.interval = 0
-            p.due = 0
-        }
-        p.nextAt = step + delay
+        if (rating == Fsrs.Rating.AGAIN) { p.errors++; p.streak = 0 } else p.streak++
+        p.memory = scheduled.memory
+        p.due = scheduled.due
+        p.interval = scheduled.interval
+        p.mastered = scheduled.memory.phase == Fsrs.Phase.REVIEW
+        p.nextAt = step // Legacy field retained for old backups and queue undo coordinates.
     }
     /** Manual assessment changes mastery, never fabricates answers or erases history. */
     fun setKnown(wordId: String, category: WordKnowledge, known: Boolean, now: Long = System.currentTimeMillis()) {
         category.skills.forEach { skill ->
             val p = state(Task(wordId, skill))
             if (p.mastered != known) {
+                val old = Fsrs.migrate(p, now)
                 p.mastered = known
                 p.streak = 0
                 p.nextAt = step
+                // A manual mark is not a successful review. Preserve history and verify it tomorrow.
+                p.memory = old?.copy(phase = if (known) Fsrs.Phase.REVIEW else Fsrs.Phase.RELEARNING,
+                    learningStep = 0, updatedAt = maxOf(now, old.lastReview), revision = java.util.UUID.randomUUID().toString())
+                    ?: if (known) Fsrs.Memory(1.0, 5.0, Fsrs.Phase.REVIEW, 0, now, now,
+                        java.util.UUID.randomUUID().toString()) else null
                 p.interval = if (known) 1 else 0
                 p.due = if (known) now + 86_400_000L else 0
             }
@@ -214,7 +245,7 @@ class LearningEngine(val progress: MutableMap<String, Progress> = mutableMapOf()
     fun restart(tasks: List<Task>, dueOnly: Boolean = false, now: Long = System.currentTimeMillis()) {
         tasks.forEach { task ->
             val p = state(task)
-            if (!dueOnly || p.due <= now) { p.mastered = false; p.streak = 0; p.nextAt = step }
+            if (!dueOnly || p.due <= now) { p.due = minOf(p.due, now); p.nextAt = step }
         }
     }
     fun options(word: Word, random: Random = Random.Default): List<String> =

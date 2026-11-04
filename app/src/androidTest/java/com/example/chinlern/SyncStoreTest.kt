@@ -78,8 +78,8 @@ class SyncStoreTest {
         assertEquals(0, phone.applySync(pending, server, "merged"))
         assertEquals(1, phone.packNames.size)
         assertEquals(1, phone.engine.state(task).errors)
-        assertTrue(phone.engine.state(other).mastered)
-        assertTrue(phone.engine.state(duringUpload).mastered)
+        assertEquals(Fsrs.Phase.LEARNING, phone.engine.state(other).memory!!.phase)
+        assertEquals(Fsrs.Phase.LEARNING, phone.engine.state(duringUpload).memory!!.phase)
         val next = SyncSnapshot.merge(server, phone.syncSnapshot(), server).packs
         tablet.applySync(tablet.syncSnapshot(), next, "final")
         phone.applySync(phone.syncSnapshot(), next, "final")

@@ -47,7 +47,7 @@ class PackFlowTest {
         restored.switchPack(oldId)
         assertEquals(16, restored.words.size)
         assertEquals(setOf("water"), restored.selected)
-        assertTrue(restored.engine.state(task).mastered)
+        assertEquals(Fsrs.Phase.LEARNING, restored.engine.state(task).memory!!.phase)
         assertEquals(0, restored.engine.state(task).errors)
         restored.switchPack(newId)
         restored.renamePack("Lesson renamed")

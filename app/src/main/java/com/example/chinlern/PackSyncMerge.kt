@@ -54,7 +54,9 @@ internal object PackSyncMerge {
         if (same(local, remote) || same(local, base) || same(remote, base))
             return value(base, local, remote) as? JSONObject
         if (local == null || remote == null) return local ?: remote
-        val merged = fields(base, local, remote)
+        // The memory model and its due date are one atomic scheduler snapshot.
+        fun withoutSrs(json: JSONObject?) = json?.let { JSONObject(it.toString()).apply { remove("srs") } }
+        val merged = fields(withoutSrs(base), withoutSrs(local)!!, withoutSrs(remote)!!)
         // Snapshots have no unique answer IDs. Maxima are retry-safe; adding counters would
         // count shared/offline answers again after a retry or an edit during upload.
         for (key in listOf("attempts", "errors")) merged.put(key, maxOf(local.optInt(key), remote.optInt(key)))
@@ -68,6 +70,15 @@ internal object PackSyncMerge {
         merged.put("confusions", JSONObject().apply {
             (keys(lc) + keys(rc)).sorted().forEach { put(it, maxOf(lc?.optInt(it) ?: 0, rc?.optInt(it) ?: 0)) }
         })
+        val schedulerSnapshots = listOf(local, remote).filter { it.has("srs") }
+        if (schedulerSnapshots.size == 2) {
+            val chosen = schedulerSnapshots.maxWith(compareBy<JSONObject> { it.getJSONObject("srs").getLong("updatedAt") }
+                .thenBy { it.getJSONObject("srs").getString("revision") })
+            for (key in listOf("srs", "mastered", "streak", "interval", "due")) merged.put(key, chosen.get(key))
+        } else if (schedulerSnapshots.size == 1) {
+            // Old clients have no timestamps: use conservative legacy merging, then migrate on review.
+            merged.remove("srs")
+        }
         return merged
     }
 

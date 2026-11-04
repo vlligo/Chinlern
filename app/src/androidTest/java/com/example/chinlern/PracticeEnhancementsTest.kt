@@ -52,7 +52,7 @@ class PracticeEnhancementsTest {
         val overview = reopened.overview().single()
         assertEquals(1, overview.introduced)
         assertEquals(0, overview.learned)
-        assertEquals(1, overview.mastered)
+        assertEquals(0, overview.mastered)
         assertEquals(1, overview.due)
     }
 }

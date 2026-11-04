@@ -8,7 +8,7 @@ Native Android vocabulary practice in Kotlin, built on the supplied Android Stud
 2. Open **Учить → Продолжить обучение** for recognition, recall, tones and listening.
 3. Open **Написание** to draw with a finger/stylus or write on paper. Reveal the answer and assess yourself. This is not handwriting recognition or stroke-order validation.
 4. If listening is unavailable, open **Настройки → Настройки голоса Android** and download a Chinese voice. You can choose Hanping instead, or temporarily turn off listening questions.
-5. Use **Прогресс** to inspect difficulties. Finishing a cycle unlocks the due-review and new-cycle controls for that mode.
+5. Use **Прогресс** to inspect difficulties. Due reviews appear automatically when you start studying; you do not need to finish a cycle to unlock them.
 
 ## Exercises
 
@@ -16,7 +16,7 @@ Nine knowledge directions: character → Russian; character → pinyin; Russian 
 
 Pinyin accepts tone marks or digits, including ü/v/u:. Every non-neutral syllable needs its correct tone. Neutral tones accept an unmarked syllable or 5. Dictionary tones are used; spoken tone sandhi is explained on relevant cards. Meaning checks accept listed synonyms, ignore case/extra whitespace/е versus ё, and offer a user-confirmed synonym override.
 
-Each word/direction tracks attempts, errors, consecutive correct answers and mastery. A mistake is scheduled after 4–7 other answers; previously mastered questions can fill the gap. With a tiny deck and no other task available the gap is shorter. After an error, two consecutive successful recalls are required. Directions with ambiguous pronunciation or meaning are excluded from affected knowledge prompts and totals. A new cycle retains historical statistics. Mastered skills receive review dates at intervals of 1, 3, 7, 15, then 30 days.
+Each word/direction has an independent FSRS-6 memory state, alongside cumulative attempts, errors and streaks. Typed answers map to Good or Again. New skills use 1-minute/10-minute learning steps; a forgotten review uses a 10-minute relearning step. Long-term intervals adapt to memory stability, difficulty, actual elapsed days and the chosen retention target. Due learning/relearning comes first, then due reviews, then new skills. Unseen prompts for a word wait ten minutes after another answer on that word to reduce answer leakage. No mastered filler questions are used. Directions with ambiguous pronunciation or meaning remain excluded.
 
 ## Your own vocabulary
 
@@ -135,6 +135,8 @@ Phone: bottom navigation, one question at a time, large touch targets and scroll
 
 ## Development
 
+Current version: **2.2** (version code **5**). See [release notes](RELEASE_NOTES.md).
+
 Open this folder in Android Studio. The supplied Gradle 9.6 / Android Gradle Plugin 9.4 configuration and API 37 target are preserved. Gradle's existing toolchain configuration requests Java 25; Android Studio's bundled JDK works.
 
 ```sh
@@ -167,6 +169,8 @@ Request spacing did not eliminate the external Hanping service failure: device l
 The Hanping recovery dialog now offers a direct switch to the system voice with a 你好 test, alongside the temporary force-stop instructions. The sound test always speaks the displayed test word regardless of the current pack. Hardware volume keys control media volume while Chinlearn is open.
 
 Hanping playback expands erhua pinyin (for example, `zher4` → `zhe4 r5`) without changing the displayed pinyin or answers. On the connected phone, Hanping rejected `zher4` for 这儿 because its phonetic count did not match the two characters; `zhe4 r5` selected the `zhe4r5` recording. A separate audio-service stall delayed that recording by about 18 seconds. Listening questions and answer cards now offer **Нет звука? Голос устройства**, which cancels queued requests, saves the system voice preference, and speaks the current word. This is a manual recovery option: Chinlearn cannot detect silent external playback.
+
+Listening tasks respect the selected provider. With device speech selected, erhua listening tasks remain available. With Hanping selected, only erhua syllables with verified complete recordings (`na3 r5` and `zhe4 r5`) are eligible; missing or unverified erhua recordings are skipped. The installed voice logged `erhua variant unavailable: na4r5` and substituted `na4`, so 那儿 cannot be a fair listening prompt with that voice. This conservative recording list is based on the connected phone, not a live Hanping capability query: PLAY exposes no availability callback, and coverage may differ between voice packs. The filter applies to ordinary, mixed-pack, and focused practice without changing saved progress or the chosen voice. Non-erhua tasks retain their existing eligibility rules.
 
 ### Email verification, sync lock, and launcher icon
 
@@ -219,11 +223,11 @@ See [SECURITY.md](SECURITY.md) for the limits of the local unlock and publishing
 
 ### Short sessions and first-time learning
 
-**Учить → 10 вопросов / 5 минут** starts a bounded session with a separate answer/correct/error summary. The five-minute limit uses elapsed wall-clock time (including time away from the app); the current answer can be finished and reviewed before advancing to results. Sessions can also be ended early. Reopening preserves the session, feedback, and counters. Undo and synonym correction update session totals as well as lifetime progress. Completing a short session does not reset the learning cycle. Changing packs or receiving changed practice data ends the local session.
+**Учить → 10 вопросов / 5 минут** starts a bounded session with a separate answer/correct/error summary. The five-minute limit uses elapsed wall-clock time (including time away from the app); the current answer can be finished and reviewed before advancing to results. Sessions can also be ended early. Brief breaks preserve the session, feedback, and counters; stale sessions refresh as described below. Undo and synonym correction update session totals as well as lifetime progress. Completing a short session never resets memory or due dates. Ten questions is a maximum: a session ends sooner when no eligible questions are due. Changing packs or receiving changed practice data ends the local session.
 
-**Прогресс → Практиковать трудные слова** offers all difficult exercises, tones/pinyin, listening, meaning, or writing. The session uses up to 100 ranked exercises from the inspected pack, including mastered exercises with historical errors, without resetting mastery. The practice pack becomes the inspected pack; checked word selections remain unchanged.
+**Прогресс → Практиковать трудные слова** offers all difficult exercises, tones/pinyin, listening, meaning, or writing. The session uses up to 100 ranked exercises from the inspected pack, including mastered exercises with historical errors. Explicit focused sessions allow an early review of each selected skill once; the actual answer updates its memory state without resetting previous history. The practice pack becomes the inspected pack; checked word selections remain unchanged.
 
-Previously unattempted words appear first as a preview with characters, marked/numbered pinyin, meanings, audio, and a hint. **Настройки → Новых слов в день** selects 0, 3, 5 (default), 10, or 20. Acknowledging a preview counts the word toward the local calendar-day limit across packs. Previously attempted words remain available without consuming that limit. Preview history, daily preferences, onboarding, and sessions are local to the profile/device, not included in cloud sync or manual vocabulary/progress backups.
+Previously unattempted words appear first as a preview with characters, marked/numbered pinyin, meanings, audio, and a hint. **Настройки → Новых слов в день** selects 0, 3, 5 (default), 10, or 20. Acknowledging a preview counts the word toward the local calendar-day limit across packs. The limit applies to regular and short daily practice; explicitly chosen focused drills can bypass it. Previously attempted words remain available without consuming that limit. Preview history, daily preferences, onboarding, and sessions are local to the profile/device, not included in cloud sync or manual vocabulary/progress backups.
 
 The first-session card checks Chinese playback, explains `shui3`, and starts ten beginner questions across up to three selected words. Users can start without listening exercises. The guide can be reopened in Settings. Pinyin feedback identifies affected syllables and distinguishes spelling from tone errors, including compact input (`ni3hao2`) and tone marks; tone-only questions show each incorrect tone. Existing translation synonym acceptance remains available.
 
@@ -253,3 +257,21 @@ Import previews warn about likely duplicates within the file and across packs. C
 All pack lists use alphabetical ordering, ignoring case, including practice selection, editing, update targets, and library summaries. Sorting retains pack IDs, selection, and progress.
 
 When the tablet keyboard is open during an exercise, a compact copy of the question stays above the scrolling answer area. Listening prompts retain a replay button. The answer field and fixed submit controls remain above the keyboard in portrait and landscape.
+
+### Fresh sessions after a break
+
+An unfinished practice session refreshes on the next local calendar day or after four hours without practice activity. The old question, draft, feedback, and short-session counters are cleared. Ten-question and five-minute sessions restart with their original mode and focus. Recorded answers, mistakes, mastery, vocabulary selection, and introduction history remain; unfinished skills remain scheduled, and due skills are selected automatically. Refreshing never resets memory strength, learning steps or due times. Brief breaks still resume the current question. Progress displays and queue selection no longer populate empty progress records for every candidate skill in large packs.
+
+
+### Adaptive scheduling and persistence
+
+The scheduler uses the published FSRS-6 21-weight defaults from [py-fsrs](https://github.com/open-spaced-repetition/py-fsrs/blob/main/fsrs/scheduler.py), with its MIT notice bundled in `app/src/main/assets/fsrs-license.txt`. It runs entirely on-device. Default desired retention is 90%; Settings offers 85%, 90%, and 95%. A higher target produces shorter intervals and more reviews. Changes apply to subsequent answers, leaving existing appointments intact. Intervals can grow beyond 30 days, up to 36,500 days. Interval fuzzing is disabled for reproducible scheduling.
+
+Memory states adapt per skill; model weights are not automatically fitted to the individual learner. The four FSRS ratings are implemented in the core; the current objective-answer and writing UI use Again/Good. “Learned” means the skill has graduated to scheduled review, not that it can never be forgotten. Recognition, recall, tones, listening, and writing remain independent. The app does not infer knowledge of one skill from success on another.
+
+Existing progress migrates lazily on the next answer. Old counters and due dates remain unchanged on load. Because old versions did not record review timestamps, initial stability is estimated from the stored interval, difficulty starts at 5, and the last review is estimated from due minus interval where available. No historical answers are invented. New reviews carry unique IDs, timestamps, ratings and elapsed days; the most recent 32 per skill are retained to bound snapshot size. Lifetime statistics remain cumulative. This is a bounded audit history, not a complete dataset for training a personalized model.
+
+Memory state, due date and recent history travel together through local saves, full backups and cloud snapshots. Undo restores the exact pre-answer state, including history and short-session counters; synonym correction replaces the mistaken answer. In concurrent edits to the same skill, sync selects the newest whole scheduler snapshot (timestamp, then revision ID), retaining retry-safe maxima for historical attempt/error counters. It does not splice memory parameters or sum shared answers. Independent skills still merge separately. A concurrent edit from an older app falls back to the conservative legacy merge and migrates at the next review. Update all syncing devices: older builds reject intervals above their previous 30-day cap.
+
+
+Version 2.2 validation: Gradle debug and release APK builds, debug lint, and Android instrumentation-test source compilation pass. All 84 JVM tests pass, covering reference-equation numerical values, long absences, learning and relearning, retention, sibling spacing, migration, bounded history, backup round-trips and atomic/retry-safe sync. Lint reports 28 warnings and no errors. Android regression tests cover store reload, exact undo, duplicate submission, daily refresh and early session completion; they have been compiled but not run on an emulator. Screen redraws now save only screen state instead of serializing the complete library and its review histories.

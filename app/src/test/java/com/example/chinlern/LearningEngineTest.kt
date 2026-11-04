@@ -53,27 +53,20 @@ class LearningEngineTest {
     @Test fun errorsAndStreaksAreIndependentPerDirection() {
         val e = LearningEngine(); val meaning = Task("water", Skill.CHARACTER_MEANING); val tone = Task("water", Skill.CHARACTER_TONE)
         e.answer(meaning, false); e.answer(tone, true)
-        assertFalse(e.state(meaning).mastered); assertTrue(e.state(tone).mastered)
+        assertFalse(e.state(meaning).mastered); assertFalse(e.state(tone).mastered)
+        assertEquals(Fsrs.Phase.LEARNING, e.state(tone).memory!!.phase)
         e.answer(meaning, true); assertFalse(e.state(meaning).mastered)
         e.answer(meaning, false); assertEquals(0, e.state(meaning).streak)
         e.answer(meaning, true); e.answer(meaning, true); assertTrue(e.state(meaning).mastered)
         assertEquals(2, e.state(meaning).errors)
     }
-    @Test fun failureWaitsForFourOtherAnswers() {
-        val e = LearningEngine(); val tasks = Skill.entries.take(7).map { Task("water", it) }
-        val failed = tasks.first(); e.answer(failed, false, delay = 4)
-        repeat(4) {
-            val next = e.next(tasks, Random(it))!!
-            assertNotEquals(failed, next)
-            e.answer(next, true)
-        }
-        assertTrue(e.state(failed).nextAt <= e.step)
-    }
-    @Test fun masteredFillersPreserveSpacingNearTheEnd() {
+    @Test fun failureWaitsForRealTimeWithoutMasteredFillers() {
         val e = LearningEngine(); val failed = Task("water", Skill.CHARACTER_TONE); val filler = Task("fire", Skill.CHARACTER_MEANING)
-        e.answer(filler, true); e.answer(failed, false, delay = 4)
-        repeat(4) { assertEquals(filler, e.next(listOf(failed, filler))); e.answer(filler, true) }
-        assertEquals(failed, e.next(listOf(failed, filler)))
+        e.setKnown("fire", WordKnowledge.RECOGNITION, true, now = 1000)
+        e.answer(failed, false, now = 1000)
+        assertNull(e.next(listOf(failed, filler), now = 60_999))
+        assertEquals(failed, e.next(listOf(failed, filler), now = 61_000))
+        assertEquals(0, e.state(filler).attempts)
     }
     @Test fun completionRequiresAllSkills() {
         val e = LearningEngine(); val tasks = e.tasks(listOf(water), false, true)
@@ -105,10 +98,15 @@ class LearningEngineTest {
     }
     @Test fun dueReviewRetainsHistoryAndFutureSkills() {
         val e = LearningEngine(); val a = Task("water", Skill.CHARACTER_MEANING); val b = Task("fire", Skill.CHARACTER_MEANING)
-        e.answer(a, true, now = 0); e.answer(b, true, now = 86_400_000)
-        e.restart(listOf(a, b), dueOnly = true, now = 86_400_001)
-        assertFalse(e.state(a).mastered); assertTrue(e.state(b).mastered); assertEquals(1, e.state(a).attempts)
-        e.answer(a, true, now = 86_400_001); assertEquals(3, e.state(a).interval)
+        e.answer(a, Fsrs.Rating.EASY, now = 1000); e.answer(b, Fsrs.Rating.EASY, now = 1000 + Fsrs.DAY)
+        val due = e.state(a).due
+        val before = e.state(a).memory
+        e.restart(listOf(a, b), dueOnly = true, now = due)
+        assertEquals(before, e.state(a).memory)
+        assertEquals(a, e.next(listOf(a, b), now = due))
+        e.answer(a, true, now = due)
+        assertTrue(e.state(a).interval > 8)
+        assertEquals(2, e.state(a).attempts)
     }
     @Test fun audioCanBeDisabledWithoutErasingStatistics() {
         val e = LearningEngine(); e.answer(Task("water", Skill.AUDIO_MEANING), false)

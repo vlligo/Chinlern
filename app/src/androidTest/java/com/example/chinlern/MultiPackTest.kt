@@ -52,7 +52,7 @@ class MultiPackTest {
         store.studyEngine.answer(task, true); store.save()
         val before = store.syncSnapshot()
         store.applySync(before, before, "revision")
-        assertTrue(store.studyEngine.state(task).mastered)
+        assertEquals(Fsrs.Phase.LEARNING, store.studyEngine.state(task).memory!!.phase)
         store.selected.clear(); store.invalidatePractice(); store.save()
         assertEquals(16, store.studyWords.size)
         store.deletePack()

@@ -218,6 +218,7 @@ class MainActivity : AppCompatActivity() {
     }
     override fun onResume() {
         super.onResume()
+        if (::store.isInitialized && store.refreshPractice()) render()
         if (auth.currentUser?.isEmailVerified == false) refreshVerification(false)
         else cloud?.sync()
     }
@@ -313,7 +314,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun render() {
-        store.save()
+        store.saveScreen()
         answerInput = null; audioNotice = null; syncStatusLabel = null
         val windowWidth = resources.configuration.screenWidthDp
         tablet = windowWidth >= 600
@@ -416,7 +417,7 @@ class MainActivity : AppCompatActivity() {
         }, LinearLayout.LayoutParams(dp(36), dp(36)))
         hero.add(heroTop)
         hero.add(label(selectedWords.size.toString(), if (tablet) 48f else 38f, Color.rgb(255, 214, 107), true), 8)
-        hero.add(label("${knowledge.count { store.studyEngine.state(it).mastered }} / ${knowledge.size} навыков закреплено", 15f, Color.WHITE), 20)
+        hero.add(label("${knowledge.count { store.studyEngine.peek(it).mastered }} / ${knowledge.size} навыков закреплено", 15f, Color.WHITE), 20)
         hero.add(progress(knowledge), 12)
         if (wideContent) {
             val overview = row().apply { gravity = Gravity.TOP }
@@ -426,27 +427,27 @@ class MainActivity : AppCompatActivity() {
         } else content.add(hero, 24)
         val short = card()
         short.add(label("Короткое занятие", 21f, ink, true))
-        short.add(label("${store.dailyNewWords} новых слов в день. Результат — после занятия; прогресс цикла сохраняется.", 15f, muted), 8)
+        short.add(label("${store.dailyNewWords} новых слов в день. Сначала повторение, затем новые слова. Можно закончить раньше, если всё повторено.", 15f, muted), 8)
         short.twoButtons(button("10 вопросов", true) { startShort(false) }, button("5 минут") { startShort(true) })
         if (store.shortSession) short.add(button("Продолжить короткое занятие") { store.route = "quiz"; render() }, 8)
         content.add(short, 16)
         val learn = card()
         learn.add(label("Значение и произношение", 21f, ink, true))
-        learn.add(label("Все выбранные слова без дневного лимита. Перевод, пиньинь и тоны. ${if (store.audioEnabled) "Задания на слух включены." else "Задания на слух выключены."}", 15f, muted), 8)
-        learn.add(button(if (knowledge.isNotEmpty() && knowledge.all { store.studyEngine.state(it).mastered }) "Посмотреть результаты" else "Продолжить обучение", true) { start(false) }, 18)
+        learn.add(label("Повторения по вашему расписанию. Перевод, пиньинь и тоны. ${if (store.audioEnabled) "Задания на слух включены." else "Задания на слух выключены."}", 15f, muted), 8)
+        learn.add(button("Продолжить обучение", true) { start(false) }, 18)
         val write = card()
         write.add(label("Написание", 21f, ink, true))
         write.add(label("Напишите иероглиф по памяти, затем сравните с ответом.", 15f, muted), 8)
-        write.add(label("${writing.count { store.studyEngine.state(it).mastered }} / ${writing.size} слов закреплено", 14f, jade), 12)
+        write.add(label("${writing.count { store.studyEngine.peek(it).mastered }} / ${writing.size} слов закреплено", 14f, jade), 12)
         write.add(button("Практиковать письмо") { start(true) }, 14)
         if (wideContent) { val line = row(); line.gravity = Gravity.TOP; line.addView(learn, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(14) }); line.addView(write, LinearLayout.LayoutParams(0, -2, 1f)); content.add(line, 16) }
         else { content.add(learn, 16); content.add(write, 14) }
-        val due = (knowledge + writing).count { val p = store.studyEngine.state(it); p.mastered && p.due <= System.currentTimeMillis() }
-        content.add(label(if (due > 0) "$due навыков пора повторить. Откройте режим и начните повторение на сегодня." else "Прогресс сохраняется на этом устройстве. Освоенные навыки возвращаются через 1, 3, 7, 15 и 30 дней.", 13f, muted), 20)
+        val due = (knowledge + writing).count { val p = store.studyEngine.peek(it); (p.attempts > 0 || p.mastered) && p.due <= System.currentTimeMillis() }
+        content.add(label(if (due > 0) "$due навыков пора повторить. Откройте режим и начните повторение на сегодня." else "Интервалы подстраиваются под ответы и время между повторениями.", 13f, muted), 20)
         if (store.studyWords.isEmpty()) content.add(button("Выбрать слова") { store.route = "words"; render() }, 12)
     }
     private fun progress(tasks: List<Task>, engine: LearningEngine = store.studyEngine) = LinearProgressIndicator(this).apply {
-        max = maxOf(tasks.size, 1); progress = tasks.count { engine.state(it).mastered }
+        max = maxOf(tasks.size, 1); progress = tasks.count { engine.peek(it).mastered }
         setIndicatorColor(gold); trackColor = Color.rgb(226, 224, 207); trackThickness = dp(7); trackCornerRadius = dp(4)
         contentDescription = "Закреплено $progress из ${tasks.size} навыков"
     }
@@ -469,6 +470,9 @@ class MainActivity : AppCompatActivity() {
         box.add(label("Ответов: ${store.sessionCount}", 28f, jade, true))
         box.add(label("Верно: ${store.sessionCorrect} · Ошибок: ${store.sessionCount - store.sessionCorrect}", 20f), 12)
         content.add(box, 20)
+        store.studyEngine.dueSchedule(store.tasks()).values.filter { it > System.currentTimeMillis() }.minOrNull()?.let {
+            content.add(label("Ближайшее повторение: ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(it))}", 15f, jade), 12)
+        }
         content.add(button("Ещё 10 вопросов", true) {
             val focus = store.session.optJSONArray("tasks")?.let { json -> (0 until json.length()).map { json.getString(it) }.toSet() }
             startShort(false, focus?.let { keys -> store.tasks().filter { it.key in keys } }, store.writing)
@@ -477,6 +481,7 @@ class MainActivity : AppCompatActivity() {
         content.add(button("К обзору") { store.leaveSession(); store.route = "learn"; render() }, 8)
     }
     private fun start(writing: Boolean) {
+        store.refreshPractice()
         if (store.shortSession) store.leaveSession()
         if (store.studyWords.isEmpty()) { toast("Выберите хотя бы одно слово"); store.route = "words"; render(); return }
         if (store.writing != writing) { store.writing = writing; store.clearQuestion() }
@@ -487,6 +492,7 @@ class MainActivity : AppCompatActivity() {
     private fun quiz() {
         if (store.sessionFinished && store.feedback == null) { shortResults(); return }
         val tasks = store.tasks()
+        if (store.feedback == null && store.current != null && store.current !in tasks) store.clearQuestion()
         if (tasks.isEmpty()) {
             heading("На сегодня всё", "Нет доступных заданий. Выберите слова или измените дневной лимит новых слов в настройках.")
             if (store.shortSession) content.add(button("Результаты занятия") { store.endSession(); render() }, 12)
@@ -495,7 +501,7 @@ class MainActivity : AppCompatActivity() {
         }
         if (store.current == null) store.nextQuestion()
         val task = store.current
-        if (task == null) { results(tasks); return }
+        if (task == null) { if (store.shortSession) shortResults() else results(tasks); return }
         quizActions.visibility = View.VISIBLE
         val word = store.studyWords.first { it.id == task.wordId }
         if (store.needsPreview(word) && store.feedback == null) {
@@ -514,12 +520,12 @@ class MainActivity : AppCompatActivity() {
             content.add(label(if (store.session.optInt("limit") > 0) "Занятие: ${store.sessionCount} / 10 ответов" else "Занятие: 5 минут · ${store.sessionCount} ответов. Завершится после текущего вопроса.", 16f, jade, true), 8)
             content.add(button("Завершить занятие") { store.endSession(); render() }, 8)
         }
-        val mastery = tasks.count { store.studyEngine.state(it).mastered }
+        val mastery = tasks.count { store.studyEngine.peek(it).mastered }
         val top = row()
         top.addView(label(if (task.skill == Skill.WRITING) "НАПИСАНИЕ" else "ЗНАНИЕ", 12f, jade, true), LinearLayout.LayoutParams(0, -2, 1f))
         top.addView(label("$mastery / ${tasks.size}", 14f, muted))
         content.add(top, 6); content.add(progress(tasks), 12)
-        content.add(label("Ошибок: ${tasks.sumOf { store.studyEngine.state(it).errors }} · ${task.skill.title}", 13f, muted), 12)
+        content.add(label("Ошибок: ${tasks.sumOf { store.studyEngine.peek(it).errors }} · ${task.skill.title}", 13f, muted), 12)
         val question = card()
         val answerKind = when (task.skill) {
             Skill.CHARACTER_MEANING, Skill.PINYIN_MEANING, Skill.AUDIO_MEANING -> "Ответ: перевод на русский"
@@ -532,7 +538,7 @@ class MainActivity : AppCompatActivity() {
             background = bg(blush, 10); setPadding(dp(12), dp(10), dp(12), dp(10))
         })
         question.add(label(task.skill.instruction, 20f, ink, true), 14)
-        if (store.studyEngine.state(task).mastered && store.feedback == null) question.add(label("Закрепление между повторениями", 12f, jade), 6)
+        if (store.studyEngine.peek(task).mastered && store.feedback == null) question.add(label("Плановое повторение", 12f, jade), 6)
         val audio = task.skill in listOf(Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER)
         // Keep the actual question outside the answer scroller while the tablet IME is open.
         if (store.feedback == null) {
@@ -650,7 +656,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             if (word.hint.isNotBlank()) result.add(label(word.hint, 15f, muted), 12)
-            result.add(label(if (store.answerIgnored) "Попытка отменена. Ошибки, серия ответов и срок повторения восстановлены." else if (!correct) "Вернётся после 4–7 других заданий. Для закрепления нужны два верных ответа подряд." else if (!store.studyEngine.state(task).mastered) "Нужен ещё один верный ответ после паузы." else "Навык закреплён в этом цикле.", 13f, if (store.answerIgnored) muted else if (correct) jade else red), 12)
+            result.add(label(if (store.answerIgnored) "Попытка отменена. Ошибки, серия ответов и срок повторения восстановлены." else "Следующее повторение: ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(store.studyEngine.peek(task).due))}.", 13f, if (store.answerIgnored) muted else if (correct) jade else red), 12)
             response.add(result, 14)
             if (!store.answerIgnored && store.canIgnoreAnswer && !correct && store.draft.isNotBlank() && task.skill in listOf(Skill.CHARACTER_MEANING, Skill.PINYIN_MEANING, Skill.AUDIO_MEANING)) {
                 response.add(button("Засчитать мой ответ") { acceptSynonym(word, task) }, 10)
@@ -689,24 +695,18 @@ class MainActivity : AppCompatActivity() {
             }.setNegativeButton("Отмена", null).show()
     }
     private fun results(tasks: List<Task>) {
-        heading("Цикл завершён", if (store.writing) "Вы воспроизвели написание всех выбранных слов." else "Все доступные сегодня направления закреплены. Новые слова ограничены дневным лимитом.")
+        heading("Сейчас повторений нет", "Прогресс сохранён. Следующие задания появятся, когда придёт время повторения.")
         val box = card(jade)
-        box.add(label("${tasks.size} / ${tasks.size}", 48f, Color.WHITE, true))
-        box.add(label("${if (store.writing) "слов" else "навыков"} закреплено", 18f, Color.WHITE), 8)
-        box.add(label("Попыток: ${tasks.sumOf { store.studyEngine.state(it).attempts }} · Ошибок: ${tasks.sumOf { store.studyEngine.state(it).errors }}\nСтатистика накопительная, за все циклы.", 14f, Color.WHITE), 16)
+        val learned = tasks.count { store.studyEngine.peek(it).mastered }
+        box.add(label("$learned / ${tasks.size} навыков изучено", 28f, Color.WHITE, true))
+        box.add(label("Попыток: ${tasks.sumOf { store.studyEngine.peek(it).attempts }} · Ошибок: ${tasks.sumOf { store.studyEngine.peek(it).errors }}", 14f, Color.WHITE), 16)
         content.add(box, 24)
-        val due = tasks.count { store.studyEngine.state(it).due <= System.currentTimeMillis() }
-        content.add(button("Повторить на сегодня ($due)", true) {
-            if (due == 0) toast("Сегодня повторений пока нет") else { store.studyEngine.restart(tasks, true); store.nextQuestion(); render() }
-        }, 20)
-        content.add(button("Новый цикл — все выбранные слова") {
-            MaterialAlertDialogBuilder(this).setTitle("Начать новый цикл?").setMessage("Закрепление в этом режиме начнётся заново. Общая статистика и другой режим сохранятся.")
-                .setPositiveButton("Начать") { _, _ -> store.studyEngine.restart(tasks); store.nextQuestion(); render() }.setNegativeButton("Отмена", null).show()
-        }, 10)
+        val earliest = store.studyEngine.dueSchedule(tasks).values.filter { it > System.currentTimeMillis() }.minOrNull()
+        earliest?.let { content.add(label("Ближайшее повторение: ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(it))}", 16f, jade), 18) }
+        content.add(button("Проверить повторения", true) { store.nextQuestion(); render() }, 20)
         content.add(button(if (store.writing) "Перейти к знаниям" else "Перейти к написанию") { start(!store.writing) }, 10)
         content.add(button("Посмотреть трудные слова") { store.route = "stats"; render() }, 10)
-        val earliest = tasks.map { store.studyEngine.state(it).due }.filter { it > 0 }.minOrNull()
-        earliest?.let { content.add(label("Ближайшее повторение: ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(it))}", 14f, muted), 18) }
+        content.add(button("К обзору") { store.route = "learn"; render() }, 10)
     }
     private fun importHub() {
         lateinit var hub: AlertDialog
@@ -912,7 +912,7 @@ class MainActivity : AppCompatActivity() {
                     store.editPack(pack.id)
                     val allowed = store.engine.tasks(store.words, false, store.audioEnabled).filter { it.wordId == word.id } + Task(word.id, Skill.WRITING)
                     val details = allowed.joinToString("\n\n") { t ->
-                        val p = store.engine.state(t)
+                        val p = store.engine.peek(t)
                         "${t.skill.title}\n${if (p.mastered) "Закреплено" else if (p.attempts == 0) "Новый" else "На повторении"} · попыток ${p.attempts}, ошибок ${p.errors}, серия ${p.streak}"
                     }
                     message("${word.hanzi} · ${word.pinyin}", details)
@@ -940,9 +940,9 @@ class MainActivity : AppCompatActivity() {
         val all = store.engine.tasks(store.words, false, store.audioEnabled)
         val writing = store.engine.tasks(store.words, true, false)
         val summary = card()
-        summary.add(label("Знание: ${all.count { store.engine.state(it).mastered }} / ${all.size}", 20f, jade, true))
+        summary.add(label("Знание: ${all.count { store.engine.peek(it).mastered }} / ${all.size}", 20f, jade, true))
         summary.add(progress(all, store.engine), 12)
-        summary.add(label("Написание: ${writing.count { store.engine.state(it).mastered }} / ${writing.size}", 20f, jade, true), 20)
+        summary.add(label("Написание: ${writing.count { store.engine.peek(it).mastered }} / ${writing.size}", 20f, jade, true), 20)
         summary.add(progress(writing, store.engine), 12)
         summary.add(label("В этом обзоре — все слова текущего набора. Обучение использует только выбранные слова.", 13f, muted), 14)
         content.add(summary, 20)
@@ -959,7 +959,7 @@ class MainActivity : AppCompatActivity() {
                 val focus = store.engine.progress.filter { (key, p) -> p.confusions.isNotEmpty() && store.words.any { it.id == key.substringBefore(':') } }
                     .keys.mapNotNull { key -> Skill.entries.find { it.name == key.substringAfter(':') }?.let { Task(key.substringBefore(':'), it) } }
                 val partners = focus.flatMap { task ->
-                    val wrong = store.engine.state(task).confusions.keys
+                    val wrong = store.engine.peek(task).confusions.keys
                     store.words.filter { word -> word.writtenForms.any { it in wrong } }.map { Task(it.id, task.skill) }
                 }
                 store.choosePracticePacks(setOf(store.activePackId))
@@ -987,7 +987,7 @@ class MainActivity : AppCompatActivity() {
         if (problematic.isEmpty()) content.add(label("Заданий с ошибками пока нет.", 15f, muted), 12)
         if (problematic.size > 100) content.add(label("Показаны 100 самых сложных заданий.", 13f, muted), 10)
         val difficultCards = problematic.take(100).map { task ->
-            val w = store.words.first { it.id == task.wordId }; val p = store.engine.state(task)
+            val w = store.words.first { it.id == task.wordId }; val p = store.engine.peek(task)
             val item = card()
             item.add(label("${w.hanzi}  ·  ${w.pinyin}", 24f, jade, true))
             item.add(label(task.skill.title, 16f, ink), 6)
@@ -1007,6 +1007,15 @@ class MainActivity : AppCompatActivity() {
                     store.dailyNewWords = limits[which]; store.save(); dialog.dismiss(); render()
                 }.setNegativeButton("Отмена", null).show()
         }, 12)
+        content.add(button("Цель запоминания: ${kotlin.math.round(store.desiredRetention * 100).toInt()}%") {
+            val targets = listOf(0.85, 0.90, 0.95)
+            MaterialAlertDialogBuilder(this).setTitle("Вероятность вспомнить к сроку повторения")
+                .setSingleChoiceItems(arrayOf("85% — меньше повторений", "90% — рекомендуется", "95% — больше повторений"),
+                    targets.indices.minByOrNull { kotlin.math.abs(targets[it] - store.desiredRetention) } ?: 1) { dialog, which ->
+                    store.desiredRetention = targets[which]; store.save(); dialog.dismiss(); render()
+                }.setNegativeButton("Отмена", null).show()
+        }, 12)
+        content.add(label("Цель применяется после следующего ответа. История и уже назначенные повторения сохраняются.", 13f, muted), 8)
         content.add(button("Как начать: звук и пиньинь") { store.onboardingDone = false; store.route = "learn"; render() }, 8)
         val accountColumn = if (wideContent) column() else content
         val optionsColumn = if (wideContent) column() else content
@@ -1101,7 +1110,7 @@ class MainActivity : AppCompatActivity() {
         optionsColumn.add(audio, 20)
         val about = card()
         about.add(label("Как устроено повторение", 21f, ink, true))
-        about.add(label("После ошибки задание возвращается через 4–7 других ответов. Два верных ответа подряд закрепляют навык. В маленьком наборе пауза может быть короче. Знание и письмо учитываются отдельно.\n\nОсвоенные навыки назначаются на повторение через 1, 3, 7, 15 и 30 дней. Повторение на сегодня доступно на экране завершённого цикла.\n\nПиньинь проверяется по словарным тонам. В речи возможны изменения тонов: например, nǐ hǎo обычно звучит как ní hǎo.\n\nНаписание оцениваете вы сами; автоматической проверки черт нет.", 15f, muted), 12)
+        about.add(label("Повторения подстраиваются под ваши ответы и время между занятиями. Новые навыки проверяются повторно после паузы; ошибки возвращаются через 1–10 минут. Знание и письмо учитываются отдельно.\n\nДальнейшие интервалы растут по мере запоминания. Повторения появляются автоматически. Когда заданий на сейчас нет, можно остановиться. На следующий день или после долгого перерыва занятие обновляется, а знания и сроки повторений сохраняются.\n\nПиньинь проверяется по словарным тонам. В речи возможны изменения тонов: например, nǐ hǎo обычно звучит как ní hǎo.\n\nНаписание оцениваете вы сами; автоматической проверки черт нет.", 15f, muted), 12)
         optionsColumn.add(about, 16)
         val privacy = card()
         privacy.add(label("Ваши данные", 21f, ink, true))

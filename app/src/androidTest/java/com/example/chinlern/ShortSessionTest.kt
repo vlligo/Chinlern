@@ -40,7 +40,7 @@ class ShortSessionTest {
 
     @Test fun tenAnswersSurviveReloadAndUndo() {
         var store = StudyStore(context)
-        store.beginSession()
+        store.beginSession(focus = store.tasks().take(10))
         repeat(10) {
             store.nextQuestion()
             store.recordAnswer(it % 2 == 0)
@@ -78,17 +78,14 @@ class ShortSessionTest {
         store.dailyNewWords = 0
         assertEquals(ids.toSet(), store.tasks().map { it.wordId }.toSet())
     }
-    @Test fun regularPracticeIncludesEverySelectedUnknownWordRegardlessOfDailyLimit() {
+    @Test fun dailyBudgetAlsoAppliesToRegularPractice() {
         val store = StudyStore(context)
         store.dailyNewWords = 0
-        val expected = store.selected.toSet()
-        assertEquals(expected, store.tasks().map { it.wordId }.toSet())
-        store.writing = true
-        assertEquals(expected, store.tasks().map { it.wordId }.toSet())
-        store.beginSession()
         assertTrue(store.tasks().isEmpty())
-        store.leaveSession()
-        assertEquals(expected, store.tasks().map { it.wordId }.toSet())
+        store.writing = true
+        assertTrue(store.tasks().isEmpty())
+        store.dailyNewWords = 3
+        assertEquals(3, store.tasks().map { it.wordId }.distinct().size)
     }
 
     @Test fun explicitFocusCanIntroduceWordsAfterDailyBudgetIsExhausted() {
@@ -130,7 +127,7 @@ class ShortSessionTest {
         store.current = Task(original.id, Skill.CHARACTER_PINYIN)
         store.recordAnswer(true)
         assertEquals(2, notifications)
-        assertTrue(StudyStore(context).engine.state(store.current!!).mastered)
+        assertEquals(Fsrs.Phase.LEARNING, StudyStore(context).engine.state(store.current!!).memory!!.phase)
     }
 
     @Test fun expiredSessionDoesNotScheduleAnotherQuestion() {

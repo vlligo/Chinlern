@@ -17,7 +17,8 @@ class MixedStudyTest {
         session.engine.answer(second, true)
         assertEquals(1, session.progressFor(a).getValue(key).errors)
         assertEquals(104, session.progressFor(a).getValue(key).nextAt)
-        assertTrue(session.progressFor(b).getValue(key).mastered)
+        assertFalse(session.progressFor(b).getValue(key).mastered)
+        assertEquals(Fsrs.Phase.LEARNING, session.progressFor(b).getValue(key).memory!!.phase)
         assertFalse(session.engine.state(first).mastered)
     }
     @Test fun uncheckedWordsRemainOutsideTheQueue() {

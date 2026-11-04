@@ -4,7 +4,7 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 
-class StudyStore(context: Context, userId: String? = null) {
+class StudyStore(context: Context, userId: String? = null, private val clock: () -> Long = System::currentTimeMillis) {
     val syncAccess = SyncAccess(context, userId)
     private val prefs = profilePreferences(context, userId)
     private val packs = JSONObject(prefs.getString("packs", "{}")!!)
@@ -73,6 +73,10 @@ class StudyStore(context: Context, userId: String? = null) {
     var strokes = ""
     var onboardingDone = prefs.getBoolean("onboardingDone", false)
     var dailyNewWords = prefs.getInt("dailyNewWords", 5)
+    var desiredRetention: Double = (prefs.getString("srsRetention", "0.9")?.toDoubleOrNull() ?: 0.9).let {
+        if (it.isFinite() && it in 0.80..0.97) it else 0.90
+    }
+        set(value) { require(value.isFinite() && value in 0.80..0.97); field = value }
     private val introductions = JSONObject(prefs.getString("introductions", "{}")!!)
     var session = JSONObject(prefs.getString("shortSession", "{}")!!)
         private set
@@ -81,28 +85,54 @@ class StudyStore(context: Context, userId: String? = null) {
     val sessionCorrect get() = session.optInt("correct")
     val sessionFinished get() = shortSession && (session.optBoolean("finished") ||
         (session.optInt("limit") > 0 && sessionCount >= session.optInt("limit")) ||
-        (session.optLong("until") > 0 && System.currentTimeMillis() >= session.optLong("until")))
-    private fun today() = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).format(java.util.Date())
+        (session.optLong("until") > 0 && clock() >= session.optLong("until")))
+    private var lastPracticeAt = prefs.getLong("lastPracticeAt", 0L)
+    private var practiceDay = prefs.getString("practiceDay", "")!!
+
+    /** Replace stale local questions, retaining every recorded learning result. */
+    fun refreshPractice(): Boolean {
+        val now = clock()
+        val stale = (current != null || shortSession) &&
+            (lastPracticeAt == 0L || practiceDay != today() || now - lastPracticeAt >= 4 * 60 * 60 * 1000L)
+        if (!stale) return false
+        val timed = shortSession && session.optLong("until") > 0
+        val focus = session.optJSONArray("tasks")?.strings()?.mapNotNull { parseTask(it) }
+        val restartShort = shortSession && !session.optBoolean("finished") &&
+            (session.optInt("limit") == 0 || sessionCount < session.optInt("limit"))
+        clearQuestion()
+        studyEngine.previous = null
+        // A fresh session must never reset memory strength, learning steps or real due times.
+        if (restartShort) beginSession(timed, focus)
+        else { session = JSONObject(); practiceDay = today(); touchPractice(); save() }
+        return true
+    }
+    private fun touchPractice() {
+        lastPracticeAt = clock()
+        if (practiceDay.isEmpty()) practiceDay = today()
+    }
+    private fun today() = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).format(java.util.Date(clock()))
     private fun introductionKey(word: Word): String {
         val origin = mixedStudy()?.origins?.get(word.id)
         return "${origin?.packId ?: activePackId}/${origin?.wordId ?: word.id}"
     }
     fun needsPreview(word: Word) = !introductions.has(introductionKey(word)) &&
         Skill.entries.none { studyEngine.progress[Task(word.id, it).key]?.let { p -> p.attempts > 0 || p.mastered } == true }
-    fun introduce(word: Word) { introductions.put(introductionKey(word), today()); save() }
+    fun introduce(word: Word) { touchPractice(); introductions.put(introductionKey(word), today()); save() }
     private fun eligibleWords(): List<Word> {
         val words = studyWords
-        // The daily introduction budget belongs to short sessions, not unrestricted practice.
-        if (!shortSession || session.has("tasks")) return words
+        // Explicit focused drills can include words outside the daily introduction budget.
+        if (shortSession && session.has("tasks")) return words
         val date = today()
         val used = introductions.keys().asSequence().count { introductions.optString(it) == date }
         val fresh = words.filter { needsPreview(it) }.take((dailyNewWords - used).coerceAtLeast(0)).map { it.id }.toSet()
         return words.filter { !needsPreview(it) || it.id in fresh }
     }
     fun beginSession(minutes: Boolean = false, focus: List<Task>? = null) {
+        practiceDay = today()
+        touchPractice()
         clearQuestion()
         session = JSONObject().put("active", true).put("limit", if (minutes) 0 else 10)
-            .put("until", if (minutes) System.currentTimeMillis() + 300_000L else 0L)
+            .put("until", if (minutes) clock() + 300_000L else 0L)
             .put("count", 0).put("correct", 0)
         focus?.let { session.put("tasks", JSONArray(it.map { task -> task.key })) }
         save()
@@ -137,6 +167,7 @@ class StudyStore(context: Context, userId: String? = null) {
             answerUndo = prefs.getString("answerUndo", null)?.let { JSONObject(it) }
             if (current == null || feedback == null) { answerUndo = null; answerIgnored = false }
         } catch (_: Exception) { current = null; feedback = null; draft = "" }
+        refreshPractice()
     }
     private fun mixedStudy(): MixedStudy? {
         if (practicePackIds == setOf(activePackId)) return null
@@ -266,6 +297,7 @@ class StudyStore(context: Context, userId: String? = null) {
     fun recordAnswer(correct: Boolean) {
         val task = current ?: return
         if (feedback != null) return
+        touchPractice()
         val session = mixedStudy()
         save()
         val origin = session?.origins?.getValue(task.wordId)
@@ -276,17 +308,21 @@ class StudyStore(context: Context, userId: String? = null) {
         (if (session == null) setOf(activePackId) else practicePackIds).forEach {
             steps.put(it, packs.getJSONObject(it).getInt("step"))
         }
-        answerUndo = JSONObject().put("sessionCount", sessionCount).put("sessionCorrect", sessionCorrect).put("pack", packId).put("key", key)
+        answerUndo = JSONObject().put("sessionReviewed", this.session.optJSONArray("reviewed") ?: JSONArray()).put("sessionCount", sessionCount).put("sessionCorrect", sessionCorrect).put("pack", packId).put("key", key)
             .put("progress", savedProgress.optJSONObject(key)?.let { JSONObject(it.toString()) } ?: JSONObject.NULL)
             .put("steps", steps).put("previous", studyEngine.previous?.key ?: JSONObject.NULL)
             .put("activePrevious", engine.previous?.key ?: JSONObject.NULL)
         beforeAnswer = studyEngine.state(task).copy()
-        studyEngine.answer(task, correct)
+        studyEngine.answer(task, correct, now = clock(), retention = desiredRetention)
         if (!correct && task.skill in characterSkills && draft in choices) {
             val state = studyEngine.state(task)
             state.confusions = state.confusions + (draft to ((state.confusions[draft] ?: 0) + 1))
         }
-        if (shortSession) this.session.put("count", sessionCount + 1).put("correct", sessionCorrect + if (correct) 1 else 0)
+        if (shortSession) {
+            this.session.put("count", sessionCount + 1).put("correct", sessionCorrect + if (correct) 1 else 0)
+            if (this.session.has("tasks")) this.session.put("reviewed",
+                JSONArray((this.session.optJSONArray("reviewed")?.strings().orEmpty() + task.key).distinct()))
+        }
         feedback = correct; answerIgnored = false
         save()
     }
@@ -311,6 +347,7 @@ class StudyStore(context: Context, userId: String? = null) {
         engine.previous = if (undo.isNull("activePrevious")) null else parseTask(undo.getString("activePrevious"))
         mixedPrevious = if (undo.isNull("previous")) null else parseTask(undo.getString("previous"))
         if (shortSession) session.put("count", undo.optInt("sessionCount")).put("correct", undo.optInt("sessionCorrect"))
+            .put("reviewed", undo.optJSONArray("sessionReviewed") ?: JSONArray())
         answerIgnored = true; answerUndo = null; beforeAnswer = null
         save()
         // Keep the revealed answer visible, but it can no longer be scored a second time.
@@ -331,19 +368,27 @@ class StudyStore(context: Context, userId: String? = null) {
         val available = if (shortSession && focus != null)
             studyEngine.tasks(studyWords, false, audioEnabled) + studyEngine.tasks(studyWords, true, false)
         else studyEngine.tasks(studyWords, writing, audioEnabled)
-        return available.filter {
+        return ListeningAvailability.filter(available, studyWords, audioProvider).filter {
             it.wordId in eligible && (!shortSession || focus == null || it.key in focus)
         }
     }
     fun clearQuestion() { current = null; feedback = null; revealed = false; draft = ""; toneDraft.clear(); choices = emptyList(); beforeAnswer = null; answerUndo = null; answerIgnored = false; strokes = "" }
     fun nextQuestion() {
+        refreshPractice()
+        practiceDay = today()
+        touchPractice()
         clearQuestion()
         if (sessionFinished) { save(); return }
         val available = tasks()
-        current = studyEngine.next(available) ?: if (shortSession) available.filter { it != studyEngine.previous }.ifEmpty { available }.randomOrNull() else null
+        val explicitFocus = shortSession && session.has("tasks")
+        val reviewed = session.optJSONArray("reviewed")?.strings()?.toSet().orEmpty()
+        val candidates = if (explicitFocus) available.filter { it.key !in reviewed } else available
+        current = studyEngine.next(candidates, now = clock())
+            ?: if (explicitFocus) candidates.firstOrNull { it.wordId != studyEngine.previous?.wordId } ?: candidates.firstOrNull() else null
+        if (current == null && shortSession) session.put("finished", true)
         current?.let { task ->
             val word = studyWords.first { it.id == task.wordId }
-            val confused = studyEngine.state(task).confusions.entries
+            val confused = studyEngine.peek(task).confusions.entries
                 .filter { !word.acceptsForm(it.key) }.sortedByDescending { it.value }.map { it.key }
             val reciprocal = (mixedStudy()?.words ?: words).filter { other -> other.id != word.id &&
                 studyEngine.progress[Task(other.id, task.skill).key]?.confusions?.keys?.any { word.acceptsForm(it) } == true
@@ -355,6 +400,7 @@ class StudyStore(context: Context, userId: String? = null) {
         save()
     }
     fun save() {
+        if (lastPracticeAt == 0L && (current != null || shortSession)) touchPractice()
         mixed?.let { mixedPrevious = it.engine.previous }
         flushMixed()
         val progressJson = JSONObject()
@@ -363,8 +409,8 @@ class StudyStore(context: Context, userId: String? = null) {
         packs.put(activePackId, JSONObject().put("name", packName).put("words", vocabulary)
             .put("selected", JSONArray(selected.toList())).put("progress", progressJson).put("step", engine.step))
         val packData = packs.toString()
-        prefs.edit().putString("shortSession", session.toString()).putString("introductions", introductions.toString())
-            .putBoolean("onboardingDone", onboardingDone).putInt("dailyNewWords", dailyNewWords).putStringSet("practicePacks", practicePackIds.toSet()).putString("packs", packData).putString("activePack", activePackId).putString("words", vocabulary).putStringSet("selected", selected.toSet())
+        prefs.edit().putLong("lastPracticeAt", lastPracticeAt).putString("practiceDay", practiceDay).putString("shortSession", session.toString()).putString("introductions", introductions.toString())
+            .putString("srsRetention", desiredRetention.toString()).putBoolean("onboardingDone", onboardingDone).putInt("dailyNewWords", dailyNewWords).putStringSet("practicePacks", practicePackIds.toSet()).putString("packs", packData).putString("activePack", activePackId).putString("words", vocabulary).putStringSet("selected", selected.toSet())
             .putString("progress", progressJson.toString()).putInt("step", engine.step)
             .putString("previous", engine.previous?.key).putString("mixedPrevious", mixedPrevious?.key).putBoolean("audio", audioEnabled)
             .putBoolean("speakAfterAnswer", speakAfterAnswer).putString("provider", audioProvider).putBoolean("slow", slowAudio).putBoolean("writing", writing)
@@ -492,8 +538,15 @@ class StudyStore(context: Context, userId: String? = null) {
     }
 
     fun exportPack(): String = JSONObject(encodeWords(words)).put("name", packName).toString(2)
+    /** Navigation and revealing an answer must not re-serialize every pack's review history. */
+    fun saveScreen() {
+        prefs.edit().putString("route", route).putBoolean("onboardingDone", onboardingDone)
+            .putBoolean("revealed", revealed).putString("tones", toneDraft.joinToString(""))
+            .putBoolean("writing", writing).apply()
+    }
     fun saveDraft() {
-        prefs.edit().putString("draft", draft).putString("strokes", strokes).apply()
+        touchPractice()
+        prefs.edit().putLong("lastPracticeAt", lastPracticeAt).putString("practiceDay", practiceDay).putString("draft", draft).putString("strokes", strokes).apply()
     }
     fun replaceWord(word: Word) = replaceWords(listOf(word))
     fun replaceWords(incoming: List<Word>) {
@@ -604,8 +657,7 @@ class StudyStore(context: Context, userId: String? = null) {
                     val task = parseTask(key)
                     require(task != null && task.wordId in ids) { "Некорректный навык." }
                     val p = readProgress(progress.getJSONObject(key))
-                    require(p.attempts >= 0 && p.errors in 0..p.attempts && p.streak in 0..p.attempts &&
-                        p.nextAt >= 0 && p.due >= 0 && p.interval in 0..30) { "Некорректный прогресс." }
+                    ProgressCodec.validate(p)
                 }
             }
         }
@@ -615,8 +667,8 @@ class StudyStore(context: Context, userId: String? = null) {
             val parts = key.split(':')
             return if (parts.size == 2) Task(parts[0], Skill.valueOf(parts[1])) else null
         }
-        private fun readProgress(j: JSONObject) = Progress(j.optInt("attempts"), j.optInt("errors"), j.optInt("streak"), j.optBoolean("mastered"), j.optInt("nextAt"), j.optLong("due"), j.optInt("interval"), j.optJSONObject("confusions")?.let { pairs -> pairs.keys().asSequence().associateWith { pairs.getInt(it) } } ?: emptyMap())
-        private fun writeProgress(p: Progress) = JSONObject().put("attempts", p.attempts).put("errors", p.errors).put("streak", p.streak).put("mastered", p.mastered).put("nextAt", p.nextAt).put("due", p.due).put("interval", p.interval).put("confusions", JSONObject(p.confusions))
+        private fun readProgress(j: JSONObject) = ProgressCodec.read(j)
+        private fun writeProgress(p: Progress) = ProgressCodec.write(p)
         private fun JSONArray.strings() = (0 until length()).map { getString(it) }
         fun decodeWords(text: String): List<Word> {
             val arr = if (text.trim().startsWith("[")) JSONArray(text) else JSONObject(text).getJSONArray("words")

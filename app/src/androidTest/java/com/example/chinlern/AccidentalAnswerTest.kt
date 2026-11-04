@@ -53,7 +53,7 @@ class AccidentalAnswerTest {
             val task = Task("water", skill)
             val snapshot = store.syncSnapshot()
             store.current = task; store.recordAnswer(true)
-            assertTrue(store.studyEngine.state(task).mastered)
+            assertNotNull(store.studyEngine.state(task).memory)
             assertTrue(store.ignoreAnswer())
             assertEquals(snapshot, store.syncSnapshot())
         }

@@ -40,6 +40,69 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         private set
     val packNames: List<Pair<String, String>> get() = PackOrder.sort(packs.keys().asSequence().map { it to packs.getJSONObject(it).getString("name") }.toList())
     val packName: String get() = packs.getJSONObject(activePackId).getString("name")
+    fun packFolder(id: String): String = packs.getJSONObject(id).optString("folder", "")
+    fun isPackHidden(id: String): Boolean = packs.getJSONObject(id).optBoolean("hidden", false)
+    val visiblePackNames get() = packNames.filterNot { isPackHidden(it.first) }
+    val folderNames get() = FolderPaths.all(packNames.map { packFolder(it.first) })
+    fun packLabel(id: String, name: String): String = packFolder(id).let { if (it.isEmpty()) name else "$it / $name" }
+
+    fun movePack(id: String, folder: String) = movePacks(setOf(id), folder)
+    fun movePacks(ids: Set<String>, folder: String) {
+        require(ids.isNotEmpty() && ids.all { packs.has(it) }) { "Выберите существующие наборы." }
+        FolderPaths.validate(folder.trim())
+        ids.forEach { packs.getJSONObject(it).put("folder", folder.trim()) }
+        save()
+    }
+    fun renameFolder(folder: String, name: String) {
+        relocateFolder(folder, FolderPaths.child(FolderPaths.parent(folder), name))
+    }
+    fun moveFolder(folder: String, parent: String) {
+        require(parent.isEmpty() || parent in folderNames) { "Папка назначения не найдена." }
+        require(!FolderPaths.contains(folder, parent)) { "Нельзя поместить папку внутрь самой себя." }
+        relocateFolder(folder, FolderPaths.child(parent, FolderPaths.title(folder)))
+    }
+    private fun relocateFolder(folder: String, target: String) {
+        require(folder.isNotEmpty() && folder in folderNames) { "Папка не найдена." }
+        if (folder == target) return
+        require(target !in folderNames) { "В этом месте уже есть папка с таким названием." }
+        val changes = packNames.filter { FolderPaths.contains(folder, packFolder(it.first)) }.associate { (id, _) ->
+            id to FolderPaths.replace(packFolder(id), folder, target)
+        }
+        changes.values.forEach(FolderPaths::validate)
+        changes.forEach { (id, path) -> packs.getJSONObject(id).put("folder", path) }
+        save()
+    }
+    fun removeFolder(folder: String) {
+        require(folder.isNotEmpty() && folder in folderNames) { "Папка не найдена." }
+        val parent = FolderPaths.parent(folder)
+        val outside = folderNames.filterNot { FolderPaths.contains(folder, it) }.toSet()
+        val children = folderNames.filter { FolderPaths.parent(it) == folder }
+        require(children.none { FolderPaths.child(parent, FolderPaths.title(it)) in outside }) {
+            "Сначала переименуйте вложенную папку: в родительской папке уже есть такое название."
+        }
+        packNames.filter { FolderPaths.contains(folder, packFolder(it.first)) }.forEach { (id, _) ->
+            val suffix = packFolder(id).removePrefix(folder).trimStart('/')
+            packs.getJSONObject(id).put("folder", listOf(parent, suffix).filter { it.isNotEmpty() }.joinToString("/"))
+        }
+        save()
+    }
+    fun setPackHidden(id: String, hidden: Boolean) {
+        require(!hidden || isPackHidden(id) || visiblePackNames.size > 1) { "Оставьте хотя бы один видимый набор." }
+        save()
+        packs.getJSONObject(id).put("hidden", hidden)
+        if (hidden) {
+            session = JSONObject(); mixed = null; mixedPrevious = null; clearQuestion()
+        }
+        save()
+    }
+    private fun normalizePracticePacks() {
+        // Concurrent hides on different devices can otherwise hide the entire library.
+        if (visiblePackNames.isEmpty()) packs.getJSONObject(packNames.first().first).put("hidden", false)
+        val previous = practicePackIds.toSet()
+        practicePackIds.retainAll(visiblePackNames.map { it.first }.toSet())
+        if (practicePackIds.isEmpty()) practicePackIds.add(visiblePackNames.first().first)
+        if (previous != practicePackIds) mixed = null
+    }
     private var mixed: MixedStudy? = null
     private var mixedPrevious = parseTask(prefs.getString("mixedPrevious", null))
     val practicePackIds = (prefs.getStringSet("practicePacks", null) ?: setOf(activePackId)).toMutableSet()
@@ -199,7 +262,7 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         } }
     }
     fun choosePracticePacks(ids: Set<String>) {
-        require(ids.isNotEmpty() && ids.all { packs.has(it) }) { "Выберите хотя бы один набор." }
+        require(ids.isNotEmpty() && ids.all { packs.has(it) && !isPackHidden(it) }) { "Выберите хотя бы один набор." }
         save(); session = JSONObject(); mixed = null; mixedPrevious = null; practicePackIds.clear(); practicePackIds.addAll(ids)
         clearQuestion(); save()
     }
@@ -406,8 +469,9 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         val progressJson = JSONObject()
         engine.progress.filterValues { it != Progress() }.forEach { (key, p) -> progressJson.put(key, writeProgress(p)) }
         val vocabulary = encodedWords()
-        packs.put(activePackId, JSONObject().put("name", packName).put("words", vocabulary)
+        packs.put(activePackId, packs.getJSONObject(activePackId).put("name", packName).put("words", vocabulary)
             .put("selected", JSONArray(selected.toList())).put("progress", progressJson).put("step", engine.step))
+        normalizePracticePacks()
         val packData = packs.toString()
         prefs.edit().putLong("lastPracticeAt", lastPracticeAt).putString("practiceDay", practiceDay).putString("shortSession", session.toString()).putString("introductions", introductions.toString())
             .putString("srsRetention", desiredRetention.toString()).putBoolean("onboardingDone", onboardingDone).putInt("dailyNewWords", dailyNewWords).putStringSet("practicePacks", practicePackIds.toSet()).putString("packs", packData).putString("activePack", activePackId).putString("words", vocabulary).putStringSet("selected", selected.toSet())
@@ -495,7 +559,8 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
     fun deletePack() {
         require(packs.length() > 1) { "Нельзя удалить последний набор." }
         val old = activePackId
-        switchPack(packNames.first { it.first != old }.first)
+        require(isPackHidden(old) || visiblePackNames.size > 1) { "Оставьте хотя бы один видимый набор." }
+        switchPack(visiblePackNames.first { it.first != old }.first)
         mixed = null; packs.remove(old); practicePackIds.remove(old)
         if (practicePackIds.isEmpty()) practicePackIds.add(activePackId)
         save()
@@ -515,7 +580,7 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         val merged = previewBackup(data) // All validation completes before changing persistent data.
         val current = syncSnapshot()
         if (merged.packs == current) {
-            val selection = practicePackIds + data.practicePacks.filter { it in merged.packs }
+            val selection = practicePackIds + data.practicePacks.filter { it in merged.packs && !isPackHidden(it) }
             if (selection != practicePackIds) choosePracticePacks(selection)
             return merged
         }
@@ -648,6 +713,9 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
                 require(id.isNotBlank() && id.length <= 100) { "Некорректный идентификатор набора." }
                 val pack = JSONObject(text)
                 require(pack.getString("name").trim().length in 1..80) { "Некорректное название набора." }
+                require(!pack.has("folder") || pack.get("folder") is String && pack.getString("folder").length <= 647) { "Некорректная папка." }
+                FolderPaths.validate(pack.optString("folder", ""))
+                require(!pack.has("hidden") || pack.get("hidden") is Boolean) { "Некорректная видимость набора." }
                 val words = decodeWords(pack.getString("words"))
                 val ids = words.map { it.id }.toSet()
                 require(pack.getJSONArray("selected").strings().all { it in ids }) { "Некорректный выбор слов." }

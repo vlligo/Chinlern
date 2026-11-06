@@ -1,14 +1,18 @@
 package com.example.chinlern
 
+import android.content.ClipData
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.text.InputType
+import android.view.DragEvent
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.*
@@ -47,6 +51,10 @@ class MainActivity : AppCompatActivity() {
     private var accessRestoreUid: String? = null
     private var syncStatus = "Синхронизация выключена"
     private var syncStatusLabel: TextView? = null
+    private lateinit var pageScroll: ScrollView
+    private val railItems = mutableMapOf<String, MaterialButton>()
+    private val pageScrollPositions = mutableMapOf<String, Int>()
+    private val navigationRoutes = listOf("learn", "words", "stats", "settings")
     private lateinit var content: LinearLayout
     private lateinit var quizActions: LinearLayout
     private lateinit var keyboardQuestion: LinearLayout
@@ -288,6 +296,19 @@ class MainActivity : AppCompatActivity() {
         setTextColor(if (primary) Color.WHITE else jade)
         setOnClickListener { action() }
     }
+    private fun listIcon(icon: Int, description: String, action: () -> Unit) =
+        androidx.appcompat.widget.AppCompatImageButton(this).apply {
+            setImageResource(icon)
+            imageTintList = ColorStateList.valueOf(muted)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            val ripple = android.util.TypedValue()
+            theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, ripple, true)
+            setBackgroundResource(ripple.resourceId)
+            contentDescription = description
+            androidx.appcompat.widget.TooltipCompat.setTooltipText(this, description)
+            setOnClickListener { action() }
+        }
     private fun card(color: Int = Color.WHITE) = column().apply { background = bg(color, 18).apply { if (color == Color.WHITE) setStroke(dp(1), Color.rgb(231, 224, 209)) }; setPadding(dp(22), dp(22), dp(22), dp(22)) }
     private fun LinearLayout.twoButtons(first: MaterialButton, second: MaterialButton) {
         if (resources.configuration.fontScale > 1.2f || (!wideContent && (first.text.length > 12 || second.text.length > 12))) {
@@ -311,6 +332,40 @@ class MainActivity : AppCompatActivity() {
                 add(line, 12)
             }
         }
+    }
+
+    private fun switchDestination(route: String) {
+        if (store.route == route) return
+        val previous = store.route
+        pageScrollPositions[previous] = pageScroll.scrollY
+        store.route = route
+        // Quiz has a different shell (keyboard controls and no bottom bar).
+        if (previous == "quiz") { render(); return }
+        store.saveScreen()
+        answerInput = null; audioNotice = null; syncStatusLabel = null
+        railItems.forEach { (destination, item) ->
+            val selected = destination == route
+            item.isSelected = selected
+            item.backgroundTintList = ColorStateList.valueOf(if (selected) blush else Color.TRANSPARENT)
+            item.setTextColor(if (selected) red else muted)
+        }
+        content.animate().cancel()
+        content.removeAllViews()
+        renderDestination()
+        selectionLabel?.text = "${if (route in listOf("learn", "words")) store.studyWords.size else store.selected.size} слов"
+        val targetScroll = pageScrollPositions[route] ?: 0
+        pageScroll.post { if (store.route == route) pageScroll.scrollTo(0, targetScroll) }
+        // A short entrance keeps switching immediate, including during rapid taps.
+        val motionEnabled = android.os.Build.VERSION.SDK_INT < 26 || android.animation.ValueAnimator.areAnimatorsEnabled()
+        content.alpha = if (motionEnabled) 0.65f else 1f
+        content.translationX = if (motionEnabled) dp(12).toFloat() *
+            (if (navigationRoutes.indexOf(route) > navigationRoutes.indexOf(previous)) 1 else -1) else 0f
+        if (motionEnabled) content.animate().alpha(1f).translationX(0f).setDuration(160)
+            .setInterpolator(android.view.animation.DecelerateInterpolator()).start()
+    }
+
+    private fun renderDestination() {
+        when (store.route) { "quiz" -> quiz(); "words" -> library(); "stats" -> stats(); "settings" -> settings(); else -> dashboard() }
     }
 
     private fun render() {
@@ -347,14 +402,33 @@ class MainActivity : AppCompatActivity() {
         root.add(header)
         root.add(View(this).apply { setBackgroundColor(gold) }, height = 2)
         val body = row().apply { gravity = Gravity.TOP }
+        railItems.clear()
         if (tablet) {
             val rail = column().apply { setPadding(dp(10), dp(20), dp(10), dp(12)); setBackgroundColor(Color.rgb(240, 235, 222)) }
             listOf("learn" to "Учить", "words" to "Слова", "stats" to "Прогресс", "settings" to "Настройки").forEach { (route, title) ->
-                rail.add(button(title, store.route == route || (route == "learn" && store.route == "quiz")) { store.route = route; render() }.apply { textSize = 14f; setPadding(dp(6), dp(10), dp(6), dp(10)) }, 8)
+                val selected = store.route == route || (route == "learn" && store.route == "quiz")
+                val item = button(title) { switchDestination(route) }.apply {
+                    textSize = 14f; setPadding(dp(6), dp(10), dp(6), dp(10))
+                    isSelected = selected
+                    backgroundTintList = ColorStateList.valueOf(if (selected) blush else Color.TRANSPARENT)
+                    setTextColor(if (selected) red else muted)
+                    icon = androidx.appcompat.content.res.AppCompatResources.getDrawable(this@MainActivity,
+                        when (route) { "words" -> R.drawable.ic_nav_words; "stats" -> R.drawable.ic_nav_stats; "settings" -> R.drawable.ic_nav_settings; else -> R.drawable.ic_nav_learn })
+                    iconTint = ColorStateList(arrayOf(intArrayOf(android.R.attr.state_selected), intArrayOf()), intArrayOf(red, muted))
+                    iconGravity = MaterialButton.ICON_GRAVITY_TEXT_TOP
+                    iconSize = dp(24)
+                }
+                railItems[route] = item
+                rail.add(item, 8)
             }
-            body.addView(rail, LinearLayout.LayoutParams(dp(railWidth), -1))
+            body.addView(ScrollView(this).apply {
+                isFillViewport = true
+                isVerticalScrollBarEnabled = false
+                addView(rail)
+            }, LinearLayout.LayoutParams(dp(railWidth), -1))
         }
         val scroll = ScrollView(this).apply { isFillViewport = true; clipToPadding = false }
+        pageScroll = scroll
         val holder = LinearLayout(this).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; setPadding(dp(if (tablet) 24 else 18), dp(8), dp(if (tablet) 24 else 18), dp(24)) }
         content = column()
         holder.addView(content, LinearLayout.LayoutParams(if (windowWidth - (if (tablet) railWidth else 0) - 48 > 1040) dp(1040) else -1, -2))
@@ -370,25 +444,39 @@ class MainActivity : AppCompatActivity() {
         }
         workspace.add(quizActions)
         body.addView(workspace, LinearLayout.LayoutParams(0, -1, 1f))
-        root.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
+        val bodyLayer = FrameLayout(this)
+        bodyLayer.addView(body, FrameLayout.LayoutParams(-1, -1))
+        root.addView(bodyLayer, LinearLayout.LayoutParams(-1, 0, 1f))
         if (!tablet && store.route != "quiz") {
             val nav = BottomNavigationView(this).apply {
-                setBackgroundColor(Color.WHITE); labelVisibilityMode = NavigationBarView.LABEL_VISIBILITY_LABELED
+                background = bg(Color.WHITE, 28).apply { setStroke(dp(1), Color.rgb(231, 224, 209)) }
+                clipToOutline = true
+                elevation = dp(3).toFloat()
+                labelVisibilityMode = NavigationBarView.LABEL_VISIBILITY_LABELED
                 itemActiveIndicatorColor = ColorStateList.valueOf(blush)
                 val navColors = ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()), intArrayOf(red, muted))
                 itemIconTintList = navColors; itemTextColor = navColors
-                menu.add(0, 1, 0, "Учить").setIcon(android.R.drawable.ic_media_play)
-                menu.add(0, 2, 1, "Слова").setIcon(android.R.drawable.ic_menu_agenda)
-                menu.add(0, 3, 2, "Прогресс").setIcon(android.R.drawable.ic_menu_sort_by_size)
-                menu.add(0, 4, 3, "Настройки").setIcon(android.R.drawable.ic_menu_preferences)
+                menu.add(0, 1, 0, "Учить").setIcon(R.drawable.ic_nav_learn)
+                menu.add(0, 2, 1, "Слова").setIcon(R.drawable.ic_nav_words)
+                menu.add(0, 3, 2, "Прогресс").setIcon(R.drawable.ic_nav_stats)
+                menu.add(0, 4, 3, "Настройки").setIcon(R.drawable.ic_nav_settings)
                 selectedItemId = when (store.route) { "words" -> 2; "stats" -> 3; "settings" -> 4; else -> 1 }
-                setOnItemSelectedListener { item -> store.route = when (item.itemId) { 2 -> "words"; 3 -> "stats"; 4 -> "settings"; else -> "learn" }; render(); true }
+                setOnItemReselectedListener { /* Keep the current page and scroll position. */ }
+                setOnItemSelectedListener { item -> switchDestination(when (item.itemId) { 2 -> "words"; 3 -> "stats"; 4 -> "settings"; else -> "learn" }); true }
             }
-            root.add(nav)
+            bodyLayer.addView(nav, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply {
+                marginStart = dp(12); marginEnd = dp(12)
+                topMargin = dp(8); bottomMargin = dp(8)
+            })
+            // Draw the page behind the dock, but allow its last item to scroll clear of it.
+            nav.addOnLayoutChangeListener { _, _, top, _, bottom, _, _, _, _ ->
+                val clearance = bottom - top + dp(16)
+                if (scroll.paddingBottom != clearance) scroll.setPadding(0, 0, 0, clearance)
+            }
         }
         setContentView(root)
         ViewCompat.getRootWindowInsets(window.decorView)?.let { ViewCompat.dispatchApplyWindowInsets(root, it) }
-        when (store.route) { "quiz" -> quiz(); "words" -> library(); "stats" -> stats(); "settings" -> settings(); else -> dashboard() }
+        renderDestination()
         ViewCompat.requestApplyInsets(root)
     }
     private fun dashboard() {
@@ -802,12 +890,81 @@ class MainActivity : AppCompatActivity() {
 
     private fun practicePicker(parent: LinearLayout = content) {
         parent.add(button("Наборы для практики: ${store.practicePackIds.size} ▾") {
-            val names = store.packNames
+            val names = store.visiblePackNames
             val chosen = store.practicePackIds.toMutableSet()
+            val allFolders = listOf("").filter { names.any { pack -> store.packFolder(pack.first).isEmpty() } } +
+                FolderPaths.all(names.map { store.packFolder(it.first) })
+            val expanded = mutableSetOf("").apply {
+                names.filter { it.first in chosen }.forEach { addAll(FolderPaths.ancestors(store.packFolder(it.first)) + store.packFolder(it.first)) }
+            }
+            var folders = emptyList<String>()
+            var groups = emptyList<List<Pair<String, String>>>()
+            val tree = ExpandableListView(this).apply {
+                dividerHeight = 0; setGroupIndicator(null)
+                setChildDivider(ColorDrawable(Color.TRANSPARENT))
+                isNestedScrollingEnabled = true
+            }
+            lateinit var adapter: BaseExpandableListAdapter
+            fun refresh() {
+                folders = allFolders.filter { FolderPaths.ancestors(it).all(expanded::contains) }
+                groups = folders.map { folder -> names.filter { store.packFolder(it.first) == folder } }
+                adapter.notifyDataSetChanged()
+                folders.indices.forEach { if (folders[it] in expanded) tree.expandGroup(it) else tree.collapseGroup(it) }
+            }
+            adapter = object : BaseExpandableListAdapter() {
+                override fun getGroupCount() = folders.size
+                override fun getChildrenCount(groupPosition: Int) = groups[groupPosition].size
+                override fun getGroup(groupPosition: Int) = folders[groupPosition]
+                override fun getChild(groupPosition: Int, childPosition: Int) = groups[groupPosition][childPosition]
+                override fun getGroupId(groupPosition: Int) = groupPosition.toLong()
+                override fun getChildId(groupPosition: Int, childPosition: Int) = childPosition.toLong()
+                override fun hasStableIds() = false
+                override fun isChildSelectable(groupPosition: Int, childPosition: Int) = true
+                override fun getGroupView(groupPosition: Int, isExpanded: Boolean, convertView: View?, parent: ViewGroup): View {
+                    val path = folders[groupPosition]
+                    val title = FolderPaths.title(path).ifEmpty { "Без папки" }
+                    val nested = names.filter { FolderPaths.contains(path, store.packFolder(it.first)) }
+                    val total = nested.size
+                    val selected = nested.count { it.first in chosen }
+                    return label("${if (isExpanded) "▾" else "▸"} $title · $selected/$total", 17f, jade, true).apply {
+                        setPadding(dp(16 + FolderPaths.depth(path) * 16), dp(14), dp(16), dp(14))
+                        minimumHeight = dp(56)
+                        contentDescription = "Папка: ${path.ifEmpty { title }}, выбрано $selected из $total"
+                        ViewCompat.setStateDescription(this, if (isExpanded) "Развёрнута" else "Свёрнута")
+                    }
+                }
+                override fun getChildView(groupPosition: Int, childPosition: Int, isLastChild: Boolean,
+                    convertView: View?, parent: ViewGroup): View {
+                    val (id, name) = getChild(groupPosition, childPosition)
+                    return CheckBox(this@MainActivity).apply {
+                        text = name; textSize = 16f; setTextColor(ink)
+                        setPadding(dp(32 + FolderPaths.depth(folders[groupPosition]) * 16), dp(8), dp(16), dp(8)); minHeight = dp(56)
+                        buttonTintList = ColorStateList.valueOf(jade)
+                        contentDescription = "Учить набор: ${store.packLabel(id, name)}"
+                        isChecked = id in chosen
+                        setOnCheckedChangeListener { _, checked ->
+                            if (checked) chosen.add(id) else chosen.remove(id)
+                            notifyDataSetChanged()
+                        }
+                    }
+                }
+            }
+            tree.setAdapter(adapter)
+            tree.setOnGroupClickListener { _, _, index, _ ->
+                val path = folders[index]
+                if (!expanded.add(path)) expanded.remove(path)
+                refresh(); true
+            }
+            refresh()
+            val box = column().apply {
+                add(label("Раскройте папку и отметьте наборы. Сворачивание папки не меняет выбор.", 14f, muted).apply {
+                    setPadding(dp(24), dp(8), dp(24), dp(12))
+                })
+                addView(tree, LinearLayout.LayoutParams(-1,
+                    minOf(dp(420), (resources.displayMetrics.heightPixels * 0.5f).toInt())))
+            }
             val dialog = MaterialAlertDialogBuilder(this).setTitle("Наборы для практики")
-                .setMultiChoiceItems(names.map { it.second }.toTypedArray(), names.map { it.first in chosen }.toBooleanArray()) { _, index, checked ->
-                    if (checked) chosen.add(names[index].first) else chosen.remove(names[index].first)
-                }.setPositiveButton("Применить", null).setNegativeButton("Отмена", null).create()
+                .setView(box).setPositiveButton("Применить", null).setNegativeButton("Отмена", null).create()
             dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 if (chosen.isEmpty()) toast("Выберите хотя бы один набор")
                 else { voice.stop(); store.choosePracticePacks(chosen); dialog.dismiss(); render() }
@@ -817,9 +974,9 @@ class MainActivity : AppCompatActivity() {
     }
     private fun packPicker() {
         content.add(button("Набор: ${store.packName} ▾") {
-            val names = store.packNames
+            val names = store.visiblePackNames
             MaterialAlertDialogBuilder(this).setTitle("Выберите набор")
-                .setSingleChoiceItems(names.map { it.second }.toTypedArray(), names.indexOfFirst { it.first == store.activePackId }) { dialog, index ->
+                .setSingleChoiceItems(names.map { store.packLabel(it.first, it.second) }.toTypedArray(), names.indexOfFirst { it.first == store.activePackId }) { dialog, index ->
                     voice.stop(); store.editPack(names[index].first); dialog.dismiss(); render()
                 }.setPositiveButton("Закрыть", null)
                 .setNeutralButton("Изменить") { _, _ -> managePack() }.show()
@@ -834,6 +991,202 @@ class MainActivity : AppCompatActivity() {
             }.setNegativeButton("Отмена", null).show()
     }
 
+    private fun manageLibrary(folder: String? = null, hidden: Boolean = false) {
+        val box = column().apply { setPadding(dp(16), dp(8), dp(16), 0) }
+        val chosen = mutableSetOf<String>()
+        val expanded = mutableSetOf("").apply { folder?.let { addAll(FolderPaths.ancestors(it) + it) } }
+        var includeHidden = hidden
+        var folders = emptyList<String>()
+        var groups = emptyList<List<Pair<String, String>>>()
+        val tree = ExpandableListView(this).apply { dividerHeight = 0; setGroupIndicator(null) }
+        val dialog = MaterialAlertDialogBuilder(this).setTitle("Наборы и папки")
+            .setView(box).setPositiveButton("Готово") { _, _ -> render() }.create()
+        box.add(label("Удерживайте ручку справа, чтобы перенести набор в папку. Для нескольких наборов используйте отметки.", 13f, muted), 4)
+        val move = button("Переместить выбранные (0)") {
+            val ids = chosen.toSet()
+            dialog.dismiss(); movePacksDialog(ids)
+        }.apply { isEnabled = false }
+        box.add(move, 6)
+        fun updateSelection() {
+            move.text = "Переместить выбранные (${chosen.size})"
+            move.isEnabled = chosen.isNotEmpty()
+        }
+        var rebuilding = false
+        lateinit var adapter: BaseExpandableListAdapter
+        fun refresh() {
+            rebuilding = true
+            folders = (listOf("") + store.folderNames).filter { FolderPaths.ancestors(it).all(expanded::contains) }
+            groups = folders.map { name -> store.packNames.filter { (id, _) ->
+                store.packFolder(id) == name && (includeHidden || !store.isPackHidden(id))
+            } }
+            chosen.retainAll(store.packNames.filter { includeHidden || !store.isPackHidden(it.first) }.map { it.first }.toSet())
+            updateSelection()
+            adapter.notifyDataSetChanged()
+            folders.indices.forEach { if (folders[it] in expanded) tree.expandGroup(it) else tree.collapseGroup(it) }
+            rebuilding = false
+        }
+        fun packActions(id: String, name: String) {
+            dialog.dismiss()
+            MaterialAlertDialogBuilder(this).setTitle(name)
+                .setItems(arrayOf("Переименовать / удалить", "Переместить в папку", if (store.isPackHidden(id)) "Показать" else "Скрыть")) { _, which ->
+                    when (which) {
+                        0 -> { store.editPack(id); managePack() }
+                        1 -> movePacksDialog(setOf(id))
+                        2 -> try {
+                            voice.stop(); store.setPackHidden(id, !store.isPackHidden(id)); render()
+                            manageLibrary(store.packFolder(id), includeHidden)
+                        } catch (e: IllegalArgumentException) { message("Не удалось скрыть", e.message ?: "") }
+                    }
+                }.setNegativeButton("Назад") { _, _ -> manageLibrary(store.packFolder(id), includeHidden) }.show()
+        }
+        adapter = object : BaseExpandableListAdapter() {
+            override fun getGroupCount() = folders.size
+            override fun getChildrenCount(groupPosition: Int) = groups[groupPosition].size
+            override fun getGroup(groupPosition: Int) = folders[groupPosition]
+            override fun getChild(groupPosition: Int, childPosition: Int) = groups[groupPosition][childPosition]
+            override fun getGroupId(groupPosition: Int) = groupPosition.toLong()
+            override fun getChildId(groupPosition: Int, childPosition: Int) = childPosition.toLong()
+            override fun hasStableIds() = false
+            override fun isChildSelectable(groupPosition: Int, childPosition: Int) = true
+            override fun getGroupView(groupPosition: Int, isExpanded: Boolean, convertView: View?, parent: ViewGroup): View {
+                val name = folders[groupPosition]
+                val title = FolderPaths.title(name).ifEmpty { "Без папки" }
+                val count = store.packNames.count { FolderPaths.contains(name, store.packFolder(it.first)) && (includeHidden || !store.isPackHidden(it.first)) }
+                return row().apply {
+                    setPadding(dp(FolderPaths.depth(name) * 16), 0, 0, 0)
+                    val heading = label("${if (isExpanded) "▾" else "▸"} $title · $count", 17f, jade, true).apply {
+                        setPadding(dp(8), dp(12), dp(8), dp(12)); minimumHeight = dp(56)
+                        contentDescription = "Папка: ${name.ifEmpty { title }}"
+                        ViewCompat.setStateDescription(this, if (isExpanded) "Развёрнута" else "Свёрнута")
+                        setOnClickListener {
+                            if (!expanded.add(name)) expanded.remove(name)
+                            refresh()
+                        }
+                    }
+                    addView(heading, LinearLayout.LayoutParams(0, -2, 1f))
+                    if (name.isNotEmpty()) addView(listIcon(R.drawable.ic_list_more, "Действия с папкой: $name") {
+                        MaterialAlertDialogBuilder(this@MainActivity).setTitle(name)
+                            .setItems(arrayOf("Переименовать папку", "Переместить папку", "Убрать папку, сохранить наборы")) { _, which ->
+                                dialog.dismiss()
+                                when (which) {
+                                    0 -> folderNameDialog(FolderPaths.title(name)) {
+                                        store.renameFolder(name, it)
+                                        manageLibrary(FolderPaths.child(FolderPaths.parent(name), it), includeHidden)
+                                    }
+                                    1 -> moveFolderDialog(name, includeHidden)
+                                    else -> try { store.removeFolder(name); render(); manageLibrary(FolderPaths.parent(name), includeHidden) }
+                                        catch (e: IllegalArgumentException) { message("Не удалось убрать папку", e.message ?: "") }
+                                }
+                            }.setNegativeButton("Отмена", null).show()
+                    }, LinearLayout.LayoutParams(dp(48), dp(48)))
+                    setOnDragListener { view, event ->
+                        val ids = (event.localState as? Set<*>)?.filterIsInstance<String>()?.toSet()
+                        if (ids.isNullOrEmpty() || ids.any { id -> store.packNames.none { it.first == id } }) false
+                        else when (event.action) {
+                            DragEvent.ACTION_DRAG_STARTED -> true
+                            DragEvent.ACTION_DRAG_ENTERED -> { view.setBackgroundColor(pale); true }
+                            DragEvent.ACTION_DRAG_EXITED, DragEvent.ACTION_DRAG_ENDED -> { view.setBackgroundColor(Color.TRANSPARENT); true }
+                            DragEvent.ACTION_DROP -> {
+                                store.movePacks(ids, name)
+                                chosen.clear(); expanded.addAll(FolderPaths.ancestors(name) + name)
+                                view.setBackgroundColor(Color.TRANSPARENT)
+                                tree.post { refresh(); render() }
+                                toast("Перемещено наборов: ${ids.size}")
+                                true
+                            }
+                            else -> true
+                        }
+                    }
+                }
+            }
+            override fun getChildView(groupPosition: Int, childPosition: Int, isLastChild: Boolean,
+                convertView: View?, parent: ViewGroup): View {
+                val (id, name) = getChild(groupPosition, childPosition)
+                fun drag(view: View): Boolean {
+                    val ids = if (id in chosen) chosen.toSet() else setOf(id)
+                    return view.startDragAndDrop(ClipData.newPlainText("Наборы", ""), View.DragShadowBuilder(view), ids, 0)
+                }
+                return row().apply {
+                    setPadding(dp(20 + FolderPaths.depth(folders[groupPosition]) * 16), 0, 0, 0)
+                    addView(CheckBox(this@MainActivity).apply {
+                        minWidth = dp(48); minHeight = dp(56); buttonTintList = ColorStateList.valueOf(jade)
+                        contentDescription = "Выбрать набор: $name"; isChecked = id in chosen
+                        setOnCheckedChangeListener { _, checked ->
+                            if (checked) chosen.add(id) else chosen.remove(id)
+                            updateSelection()
+                        }
+                    }, LinearLayout.LayoutParams(dp(48), -2))
+                    addView(label(name + if (store.isPackHidden(id)) " · скрыт" else "", 16f, ink).apply {
+                        minimumHeight = dp(56); gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(4), dp(8), dp(4), dp(8))
+                        contentDescription = "Набор: $name"
+                        setOnClickListener { packActions(id, name) }
+                        setOnLongClickListener { drag(it) }
+                    }, LinearLayout.LayoutParams(0, -2, 1f))
+                    addView(listIcon(R.drawable.ic_list_drag, "Перетащить набор: $name") { toast("Удерживайте, чтобы перетащить на папку") }.apply {
+                        setOnLongClickListener { drag(it) }
+                    }, LinearLayout.LayoutParams(dp(48), dp(48)))
+                }
+            }
+        }
+        tree.setAdapter(adapter)
+        tree.setOnGroupClickListener { _, _, index, _ ->
+            if (!rebuilding) { val path = folders[index]; if (!expanded.add(path)) expanded.remove(path); refresh() }
+            true
+        }
+        tree.setOnDragListener { _, event ->
+            if (event.localState !is Set<*>) false else {
+                if (event.action == DragEvent.ACTION_DRAG_LOCATION) {
+                    if (event.y < dp(56)) tree.smoothScrollBy(-dp(40), 120)
+                    else if (event.y > tree.height - dp(56)) tree.smoothScrollBy(dp(40), 120)
+                }
+                event.action != DragEvent.ACTION_DROP
+            }
+        }
+        box.add(CheckBox(this).apply {
+            text = "Показывать скрытые наборы"; isChecked = includeHidden
+            minHeight = dp(48); buttonTintList = ColorStateList.valueOf(jade)
+            setOnCheckedChangeListener { _, checked -> includeHidden = checked; refresh() }
+        })
+        box.addView(tree, LinearLayout.LayoutParams(-1, minOf(dp(420), (resources.displayMetrics.heightPixels * 0.5f).toInt())))
+        refresh(); dialog.show()
+    }
+
+    private fun folderNameDialog(initial: String = "", action: (String) -> Unit) {
+        val box = column().apply { setPadding(dp(24), dp(8), dp(24), dp(8)) }
+        val name = field("Название папки", initial, box)
+        val dialog = MaterialAlertDialogBuilder(this).setTitle("Папка").setView(box)
+            .setPositiveButton("Сохранить", null).setNegativeButton("Отмена") { _, _ -> manageLibrary() }.create()
+        dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val value = name.text.toString().trim()
+            if (value.length !in 1..80) name.error = "Введите от 1 до 80 знаков"
+            else try { action(value); dialog.dismiss(); render() } catch (e: IllegalArgumentException) { name.error = e.message }
+        } }; dialog.show()
+    }
+
+    private fun moveFolderDialog(source: String, includeHidden: Boolean) {
+        val targets = listOf("") + store.folderNames.filterNot { FolderPaths.contains(source, it) }
+        MaterialAlertDialogBuilder(this).setTitle("Переместить папку «${FolderPaths.title(source)}»")
+            .setItems(targets.map { it.ifEmpty { "В корень" } }.toTypedArray()) { _, index ->
+                try {
+                    store.moveFolder(source, targets[index]); render()
+                    manageLibrary(FolderPaths.child(targets[index], FolderPaths.title(source)), includeHidden)
+                } catch (e: IllegalArgumentException) { message("Не удалось переместить", e.message ?: "") }
+            }.setNegativeButton("Отмена") { _, _ -> manageLibrary(source, includeHidden) }.show()
+    }
+
+    private fun movePacksDialog(ids: Set<String>) {
+        val folders = store.folderNames
+        MaterialAlertDialogBuilder(this).setTitle("Переместить наборы: ${ids.size}")
+            .setItems((listOf("Без папки", "＋ Новая папка") + folders).toTypedArray()) { _, index ->
+                if (index == 1) folderNameDialog { store.movePacks(ids, it); manageLibrary(it) }
+                else {
+                    val folder = if (index == 0) "" else folders[index - 2]
+                    store.movePacks(ids, folder); render(); manageLibrary(folder)
+                }
+            }.setNegativeButton("Отмена") { _, _ -> manageLibrary() }.show()
+    }
+
     private fun managePack() {
         val box = column().apply { setPadding(dp(24), dp(8), dp(24), dp(8)) }
         val name = field("Название набора", store.packName, box)
@@ -843,7 +1196,7 @@ class MainActivity : AppCompatActivity() {
                 if (store.packNames.size == 1) message("Нельзя удалить", "Должен остаться хотя бы один набор.")
                 else MaterialAlertDialogBuilder(this).setTitle("Удалить «${store.packName}»?")
                     .setMessage("Слова и прогресс этого набора будут удалены. Остальные наборы сохранятся.")
-                    .setPositiveButton("Удалить") { _, _ -> store.deletePack(); render() }.setNegativeButton("Отмена", null).show()
+                    .setPositiveButton("Удалить") { _, _ -> try { voice.stop(); store.deletePack(); render() } catch (e: IllegalArgumentException) { message("Нельзя удалить", e.message ?: "") } }.setNegativeButton("Отмена", null).show()
             }.create()
         dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             try { store.renamePack(name.text.toString()); dialog.dismiss(); render() } catch (e: Exception) { name.error = e.message }
@@ -853,7 +1206,7 @@ class MainActivity : AppCompatActivity() {
         heading("Ваши слова", "Отметьте слова, которые хотите учить.")
         content.add(button("＋ Новый набор", true) { importHub() }, 12)
         practicePicker()
-        content.add(button("Управление набором") { chooseEditingPack { managePack() } }, 8)
+        content.add(button("Управление наборами и папками") { manageLibrary() }, 8)
         content.twoButtons(button("＋ Слово") { chooseEditingPack { editWord(null) } }, button("Файлы") {
             MaterialAlertDialogBuilder(this).setTitle("Наборы слов").setItems(arrayOf("Создать набор с помощью ИИ / вставить ответ", "Импортировать файл", "Экспортировать набор")) { _, which ->
                 when (which) {

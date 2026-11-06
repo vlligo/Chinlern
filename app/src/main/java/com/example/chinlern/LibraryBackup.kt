@@ -56,7 +56,9 @@ object LibraryBackup {
             if (existing == null) { result[id] = text; added++; return@forEach }
             if (existing == text) return@forEach
             val left = JSONObject(existing); val right = JSONObject(text)
-            var conflict = left.getString("name") != right.getString("name")
+            var conflict = left.getString("name") != right.getString("name") ||
+                left.optString("folder", "") != right.optString("folder", "") ||
+                left.optBoolean("hidden", false) != right.optBoolean("hidden", false)
             val mergedWords = words(left).associateByTo(linkedMapOf()) { it.getString("id") }
             val compatible = mutableSetOf<String>()
             words(right).forEach { word ->

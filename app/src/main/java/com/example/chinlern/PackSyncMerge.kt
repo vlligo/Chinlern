@@ -106,6 +106,12 @@ internal object PackSyncMerge {
         return SyncSnapshot.pack(JSONObject().put("name", value(base?.opt("name"), local.get("name"), remote.get("name")))
             .put("words", JSONObject().put("version", 1).put("words", JSONArray(mergedWords)).toString())
             .put("selected", JSONArray(ids.filter { selection.getBoolean(it) }.sorted()))
-            .put("progress", mergedProgress).put("step", step))
+            .put("progress", mergedProgress).put("step", step)
+            .apply {
+                if (listOfNotNull(base, local, remote).any { it.has("folder") })
+                    put("folder", value(base?.optString("folder", "") ?: "", local.optString("folder", ""), remote.optString("folder", "")))
+                if (listOfNotNull(base, local, remote).any { it.has("hidden") })
+                    put("hidden", value(base?.optBoolean("hidden", false) ?: false, local.optBoolean("hidden", false), remote.optBoolean("hidden", false)))
+            })
     }
 }

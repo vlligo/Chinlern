@@ -32,6 +32,20 @@ class PackSyncMergeTest {
         (0 until a.length()).map { a.getJSONObject(it) }
     }
 
+    @Test fun organizationMergesWithIndependentProgressAndSurvivesBackup() {
+        val base = pack()
+        val local = copy(base).put("folder", "Уроки").put("hidden", true)
+        val remote = copy(base)
+        remote.getJSONObject("progress").put("a:WRITING", state(1, 0, true))
+        val merged = merge(base, local, remote)
+        assertEquals("Уроки", merged.getString("folder"))
+        assertTrue(merged.getBoolean("hidden"))
+        assertEquals(1, merged.getJSONObject("progress").getJSONObject("a:WRITING").getInt("attempts"))
+        val snapshot = mapOf("p" to SyncSnapshot.pack(merged))
+        assertEquals(snapshot, LibraryBackup.decode(LibraryBackup.encode(LibraryBackup.Data(snapshot, emptySet()))).packs)
+        assertEquals(SyncSnapshot.pack(merged), SyncSnapshot.pack(merge(base, local, merged)))
+    }
+
     @Test fun independentSkillsAndRenameSurviveTogetherWithRebasedDelays() {
         val b = pack(); val l = copy(b).put("step", 2); val r = copy(b).put("step", 4).put("name", "Renamed")
         l.getJSONObject("progress").put("a:WRITING", state(1, 0, true, 7))

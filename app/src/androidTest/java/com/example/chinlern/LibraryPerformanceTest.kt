@@ -22,8 +22,6 @@ class LibraryPerformanceTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
     private fun fixture(count: Int) {
-        // These checks use ListView.setSelection; touch mode intentionally suppresses row selection.
-        instrumentation.setInTouchMode(false)
         context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit()
         StudyStore(context).apply {
             val seed = words.first()
@@ -60,6 +58,11 @@ class LibraryPerformanceTest {
     private fun descendants(view: View): List<View> = listOf(view) +
         if (view is ViewGroup) (0 until view.childCount).flatMap { descendants(view.getChildAt(it)) } else emptyList()
     private fun list(activity: MainActivity) = descendants(activity.window.decorView).filterIsInstance<ListView>().single()
+    private fun jumpToRow(list: ListView, row: Int) {
+        // ListView keeps keyboard selection separate from touch-mode scroll position.
+        list.requestFocusFromTouch()
+        list.setSelectionFromTop(row, 0)
+    }
     private fun expectedRows(activity: MainActivity, words: Int): Int {
         val width = MainActivity::class.java.getDeclaredField("contentWidthDp")
             .apply { isAccessible = true }.getInt(activity)
@@ -67,7 +70,8 @@ class LibraryPerformanceTest {
         return 1 + (words + columns - 1) / columns
     }
     private fun check(activity: MainActivity, description: String) = descendants(activity.window.decorView)
-        .filterIsInstance<CheckBox>().single { it.contentDescription == description }
+        .filterIsInstance<CheckBox>().singleOrNull { it.contentDescription == description }
+        ?: error("Missing $description in rows ${list(activity).firstVisiblePosition}–${list(activity).lastVisiblePosition}")
 
     @Test fun measureOpening87Words() {
         fixture(87)
@@ -100,20 +104,20 @@ class LibraryPerformanceTest {
                 val list = list(activity)
                 assertEquals(expectedRows(activity, 87), list.count) // One header plus all 87 words, without truncation.
                 assertTrue("Only visible rows should exist", list.childCount < 10)
-                list.setSelection(list.count - 1)
+                jumpToRow(list, list.count - 1)
             }
             awaitPage(scenario)
             scenario.onActivity { activity ->
                 assertEquals(before, data(activity).syncSnapshot())
                 check(activity, "Учить 水86 · Мои слова").performClick()
                 check(activity, "Умею писать: 水86 · Мои слова").performClick()
-                list(activity).setSelection(1)
+                jumpToRow(list(activity), 1)
             }
             awaitPage(scenario)
             scenario.onActivity { activity ->
                 assertTrue(check(activity, "Учить 水0 · Мои слова").isChecked)
                 assertFalse(check(activity, "Умею писать: 水0 · Мои слова").isChecked)
-                list(activity).let { it.setSelection(it.count - 1) }
+                list(activity).let { jumpToRow(it, it.count - 1) }
             }
             awaitPage(scenario)
             scenario.onActivity { activity ->
@@ -124,7 +128,7 @@ class LibraryPerformanceTest {
             awaitPage(scenario)
             scenario.onActivity { activity ->
                 assertTrue(list(activity).firstVisiblePosition > 0)
-                list(activity).setSelection(0)
+                jumpToRow(list(activity), 0)
             }
             awaitPage(scenario)
             scenario.onActivity { activity ->
@@ -159,7 +163,7 @@ class LibraryPerformanceTest {
             scenario.onActivity { activity ->
                 assertEquals(expectedRows(activity, 1000), list(activity).count)
                 assertTrue(list(activity).childCount < 10)
-                list(activity).let { it.setSelection(it.count - 1) }
+                list(activity).let { jumpToRow(it, it.count - 1) }
             }
             awaitPage(scenario)
             scenario.onActivity { activity ->

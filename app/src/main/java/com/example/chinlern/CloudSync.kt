@@ -66,7 +66,7 @@ class CloudSync(
         if (!allowed()) return
         if (running) { syncAgain = true; return }
         handler.removeCallbacks(syncTask); scheduled = false
-        val local = store.syncSnapshot()
+        val local = store.savedSyncSnapshot()
         val base = store.syncBase.toMap()
         val baseRevision = store.syncRevision
         val proposedRevision = UUID.randomUUID().toString()
@@ -112,12 +112,15 @@ class CloudSync(
             running = false
             if (!allowed()) return@addOnSuccessListener
             try {
-                val before = store.syncSnapshot()
-                val moreConflicts = store.applySync(local, result.packs, result.revision)
-                val after = store.syncSnapshot()
+                val before = if (result.packs == local) null else store.savedSyncSnapshot()
+                val moreConflicts = if (before == null) {
+                    store.acknowledgeSync(result.packs, result.revision)
+                    0
+                } else store.applySync(local, result.packs, result.revision)
+                val after = store.savedSyncSnapshot()
                 retryDelay = 30_000
                 onStatus(if (after == result.packs) "Синхронизировано" else "Новые изменения ожидают отправки")
-                onApplied(result.conflicts + moreConflicts, before != after)
+                onApplied(result.conflicts + moreConflicts, before != null && before != after)
                 if (listener == null) listen()
                 if (after != result.packs || syncAgain) schedule(5_000)
             } catch (error: Exception) {

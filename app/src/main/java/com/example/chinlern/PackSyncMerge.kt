@@ -112,6 +112,10 @@ internal object PackSyncMerge {
                     put("folder", value(base?.optString("folder", "") ?: "", local.optString("folder", ""), remote.optString("folder", "")))
                 if (listOfNotNull(base, local, remote).any { it.has("hidden") })
                     put("hidden", value(base?.optBoolean("hidden", false) ?: false, local.optBoolean("hidden", false), remote.optBoolean("hidden", false)))
+                if (listOfNotNull(base, local, remote).any { it.has("practice") })
+                    // Missing membership from an older client is not a deselection.
+                    put("practice", value(base?.opt("practice"), local.opt("practice") ?: base?.opt("practice"),
+                        remote.opt("practice") ?: base?.opt("practice")))
             })
     }
 }

@@ -72,12 +72,13 @@ class PackFlowTest {
     @Test fun pickerSwitchesPackAndSurvivesRotation() {
         val store = StudyStore(context)
         store.importPack("Travel", listOf(store.words.first()))
+        store.route = "words"; store.save()
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            onView(withText("Наборы для практики: 1 ▾")).perform(scrollTo(), click())
+            onView(libraryPracticePicker(1)).perform(scrollToLibraryControl(), click())
             onView(withText("Мои слова")).perform(click())
             onView(withText("Применить")).perform(click())
             scenario.recreate()
-            onView(withText("Наборы для практики: 2 ▾")).check(matches(isDisplayed()))
+            onView(libraryPracticePicker(2)).check(matches(isDisplayed()))
             assertEquals(17, StudyStore(context).studyWords.size)
         }
     }

@@ -46,6 +46,29 @@ class PackSyncMergeTest {
         assertEquals(SyncSnapshot.pack(merged), SyncSnapshot.pack(merge(base, local, merged)))
     }
 
+    @Test fun practiceMembershipMergesWithProgressAndWordSelection() {
+        val base = pack().put("practice", true)
+        val local = copy(base).put("practice", false)
+        val remote = copy(base).put("selected", JSONArray(listOf("b")))
+        remote.getJSONObject("progress").put("b:WRITING", state(1, 0, true))
+        val merged = merge(base, local, remote)
+        assertFalse(merged.getBoolean("practice"))
+        assertEquals(listOf("b"), merged.getJSONArray("selected").let { a -> (0 until a.length()).map(a::getString) })
+        assertEquals(1, merged.getJSONObject("progress").getJSONObject("b:WRITING").getInt("attempts"))
+        assertEquals(SyncSnapshot.pack(merged), SyncSnapshot.pack(merge(base, local, merged)))
+        assertEquals(SyncSnapshot.pack(merged), SyncSnapshot.pack(merge(base, remote, local)))
+    }
+
+    @Test fun legacyPackDoesNotErasePracticeMembership() {
+        val base = pack().put("practice", true)
+        val local = copy(base).put("practice", false)
+        val remote = copy(base).put("name", "Old device edit").apply { remove("practice") }
+        assertFalse(merge(base, local, remote).getBoolean("practice"))
+        assertFalse(merge(base, remote, local).getBoolean("practice"))
+        // First upgrade: a cloud choice is preserved when the other side has no membership yet.
+        assertFalse(merge(pack(), pack().put("name", "Legacy edit"), local).getBoolean("practice"))
+    }
+
     @Test fun independentSkillsAndRenameSurviveTogetherWithRebasedDelays() {
         val b = pack(); val l = copy(b).put("step", 2); val r = copy(b).put("step", 4).put("name", "Renamed")
         l.getJSONObject("progress").put("a:WRITING", state(1, 0, true, 7))

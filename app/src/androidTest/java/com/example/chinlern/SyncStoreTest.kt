@@ -98,6 +98,39 @@ class SyncStoreTest {
         assertEquals("drawing", store.strokes)
     }
 
+    @Test fun acknowledgingUploadPreservesNewerAnswerAndQuestionAfterReload() {
+        val store = StudyStore(context)
+        val pending = store.syncSnapshot()
+        store.beginSession(focus = listOf(task, Task("fire", Skill.CHARACTER_PINYIN)))
+        store.nextQuestion(); store.recordAnswer(false); store.nextQuestion()
+        store.draft = "still typing"; store.saveDraft()
+        val latest = store.savedSyncSnapshot()
+        val question = store.current
+        store.acknowledgeSync(pending, "acknowledged")
+        val restored = StudyStore(context)
+        assertEquals(latest, restored.savedSyncSnapshot())
+        assertEquals(pending, restored.syncBase)
+        assertEquals("acknowledged", restored.syncRevision)
+        assertEquals(question, restored.current)
+        assertEquals("still typing", restored.draft)
+        assertEquals(1, restored.sessionCount)
+    }
+
+    @Test fun cachedSnapshotsReflectSelectionAndAnswerChanges() {
+        val store = StudyStore(context)
+        val first = store.syncSnapshot()
+        assertEquals(first, store.savedSyncSnapshot())
+        store.selectLibraryWord(store.activePackId, "water", false)
+        val changed = store.savedSyncSnapshot()
+        assertNotEquals(first, changed)
+        store.selectLibraryWord(store.activePackId, "water", true)
+        assertEquals(first, store.savedSyncSnapshot())
+        store.current = task; store.recordAnswer(true)
+        assertNotEquals(first, store.savedSyncSnapshot())
+        store.ignoreAnswer()
+        assertEquals(first, store.savedSyncSnapshot())
+    }
+
     @Test fun invalidCloudDataDoesNotChangeLocalLibraryOrBaseline() {
         val store = StudyStore(context)
         val pending = store.syncSnapshot()

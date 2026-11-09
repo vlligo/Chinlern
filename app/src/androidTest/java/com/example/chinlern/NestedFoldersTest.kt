@@ -54,7 +54,7 @@ class NestedFoldersTest {
         ActivityScenario.launch(MainActivity::class.java).use {
             fun tap(text: String) = onView(withText(text)).perform(click())
             fun desc(text: String) = onView(withContentDescription(text))
-            onView(withText("Управление наборами и папками")).perform(scrollTo(), click())
+            onView(withText("Управление наборами и папками")).perform(scrollToLibraryControl(), click())
             desc("Действия с папкой: Lessons").perform(click()); tap("Переместить папку"); tap("Archive")
             assertEquals("Archive/Lessons/Unit", StudyStore(context).packFolder(first))
             desc("Папка: Archive/Lessons/Unit").perform(click())
@@ -64,7 +64,7 @@ class NestedFoldersTest {
             desc("Папка: Archive").perform(click())
             desc("Набор: Lesson").check(matches(isDisplayed()))
             tap("Готово")
-            onView(withText("Наборы для практики: 2 ▾")).perform(scrollTo(), click())
+            onView(libraryPracticePicker(2)).perform(scrollToLibraryControl(), click())
             desc("Учить набор: Archive/Lessons/Unit / Lesson").check(matches(isChecked()))
             desc("Папка: Archive, выбрано 2 из 2").perform(click())
             desc("Учить набор: Archive/Lessons/Unit / Lesson").check(doesNotExist())

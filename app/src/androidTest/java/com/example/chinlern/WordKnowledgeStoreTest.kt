@@ -45,17 +45,40 @@ class WordKnowledgeStoreTest {
         assertTrue(word.id in StudyStore(context).libraryPacks().first { it.id == second }.writable)
     }
 
+    @Test fun libraryReadReflectsUnsavedAndMixedProgressWithoutWritingPreferences() {
+        val store = StudyStore(context)
+        val first = store.activePackId
+        val word = store.words.first()
+        store.engine.setKnown(word.id, WordKnowledge.WRITING, true)
+        store.selected.remove(word.id)
+        val prefs = context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE)
+        val before = prefs.all.toMap()
+        val pack = store.libraryPacks().single()
+        assertTrue(word.id in pack.writable)
+        assertFalse(word.id in pack.selected)
+        assertEquals(before, prefs.all)
+        store.importPack("Second", listOf(word))
+        store.choosePracticePacks(setOf(first, store.activePackId))
+        val mixedWord = store.studyWords.single { it.hanzi == word.hanzi }
+        store.studyEngine.setKnown(mixedWord.id, WordKnowledge.RECOGNITION, true)
+        val mixedBefore = prefs.all.toMap()
+        val packs = store.libraryPacks().associateBy { it.id }
+        assertTrue(word.id in packs.getValue(store.activePackId).recognized)
+        assertTrue(word.id in packs.getValue(first).writable)
+        assertEquals(mixedBefore, prefs.all)
+    }
+
     @Test fun wordCardMarksSurviveRecreationAndCanBeRemoved() {
         val store = StudyStore(context)
         store.route = "words"; store.save()
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            onView(withHint("Найти слово, пиньинь или перевод")).perform(scrollTo(), replaceText("shui3"), closeSoftKeyboard())
-            onView(withContentDescription("Узнаю слово: 水 · Мои слова")).perform(scrollTo(), click()).check(matches(isChecked()))
-            onView(withContentDescription("Умею писать: 水 · Мои слова")).check(matches(isNotChecked())).perform(scrollTo(), click())
+            onView(withHint("Найти слово, пиньинь или перевод")).perform(scrollToLibraryControl(), replaceText("shui3"), closeSoftKeyboard())
+            onView(withContentDescription("Узнаю слово: 水 · Мои слова")).perform(scrollToLibraryControl(), click()).check(matches(isChecked()))
+            onView(withContentDescription("Умею писать: 水 · Мои слова")).check(matches(isNotChecked())).perform(scrollToLibraryControl(), click())
             scenario.recreate()
-            onView(withHint("Найти слово, пиньинь или перевод")).perform(scrollTo(), replaceText("shui3"), closeSoftKeyboard())
-            onView(withContentDescription("Узнаю слово: 水 · Мои слова")).perform(scrollTo()).check(matches(isChecked()))
-            onView(withContentDescription("Умею писать: 水 · Мои слова")).perform(scrollTo()).check(matches(isChecked())).perform(click())
+            onView(withHint("Найти слово, пиньинь или перевод")).perform(scrollToLibraryControl(), replaceText("shui3"), closeSoftKeyboard())
+            onView(withContentDescription("Узнаю слово: 水 · Мои слова")).perform(scrollToLibraryControl()).check(matches(isChecked()))
+            onView(withContentDescription("Умею писать: 水 · Мои слова")).perform(scrollToLibraryControl()).check(matches(isChecked())).perform(click())
             assertTrue("water" in StudyStore(context).libraryPacks().single().recognized)
             assertFalse("water" in StudyStore(context).libraryPacks().single().writable)
         }

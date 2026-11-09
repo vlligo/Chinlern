@@ -27,8 +27,8 @@ android {
         applicationId = "com.example.chinlern"
         minSdk = 24
         targetSdk = 37
-        versionCode = 7
-        versionName = "2.3"
+        versionCode = 8
+        versionName = "2.4"
         buildConfigField("String", "SYNC_PASSWORD_SHA256", "\"$syncVerifier\"")
 
         testInstrumentationRunner = "com.example.chinlern.SafeTestRunner"
@@ -57,6 +57,8 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.constraintlayout)
     implementation(libs.androidx.core.ktx)
+    implementation("androidx.viewpager:viewpager:1.0.0")
+    implementation("androidx.webkit:webkit:1.12.1")
     implementation(libs.material)
     testImplementation(libs.junit)
     testImplementation("org.json:json:20240303")

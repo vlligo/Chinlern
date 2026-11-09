@@ -25,7 +25,7 @@ class PracticeTreeTest {
         data.choosePracticePacks(setOf(original))
         data.route = "words"; data.save()
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            fun open(count: Int) = onView(withText("Наборы для практики: $count ▾")).perform(scrollTo(), click())
+            fun open(count: Int) = onView(libraryPracticePicker(count)).perform(scrollToLibraryControl(), click())
             fun folder(selected: Int) = onView(withContentDescription("Папка: Lessons, выбрано $selected из 1"))
             fun lessonRow() = onView(withContentDescription("Учить набор: Lessons / Lesson one"))
             open(1)

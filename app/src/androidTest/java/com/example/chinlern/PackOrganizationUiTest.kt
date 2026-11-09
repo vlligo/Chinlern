@@ -62,7 +62,7 @@ class PackOrganizationUiTest {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             fun tap(text: String) = onView(withText(text)).perform(click())
             fun desc(text: String) = onView(withContentDescription(text))
-            onView(withText("Управление наборами и папками")).perform(scrollTo(), click())
+            onView(withText("Управление наборами и папками")).perform(scrollToLibraryControl(), click())
             desc("Перетащить набор: Alpha").perform(dragTo("Папка: Lessons"))
             assertEquals("Lessons", StudyStore(context).packFolder(first))
             assertEquals(setOf(first, second), StudyStore(context).practicePackIds)
@@ -86,7 +86,7 @@ class PackOrganizationUiTest {
             assertFalse(StudyStore(context).isPackHidden(second))
             desc("Набор: Beta").perform(click()); tap("Переименовать / удалить"); tap("Удалить набор"); tap("Отмена")
             assertEquals(2, StudyStore(context).packNames.size)
-            onView(withText("Управление наборами и папками")).perform(scrollTo(), click())
+            onView(withText("Управление наборами и папками")).perform(scrollToLibraryControl(), click())
             desc("Набор: Beta").perform(click()); tap("Переименовать / удалить"); tap("Удалить набор"); tap("Удалить")
             scenario.recreate()
             assertEquals(listOf(first), StudyStore(context).packNames.map { it.first })

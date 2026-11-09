@@ -1,12 +1,9 @@
-# Chinlearn 2.3
+# Chinlearn 2.4
 
-- Organize word lists in expandable folders, with up to eight nested levels. Move or rename an entire branch, or remove a folder while keeping its lists.
-- Drag lists onto folders, including collapsed folders, or select several lists and move them together.
-- Choose practice lists in a folder tree with selected/total counts. Collapsing a branch keeps your selections; Cancel discards pending changes.
-- Hide lists from practice without deleting vocabulary or progress, then restore them through the organizer. At least one list stays visible.
-- Folder assignments and visibility are included in full-library backups and cloud sync. Moving lists preserves vocabulary, progress, and practice selection.
-- Refreshed navigation icons and transitions, with remembered scroll positions when switching between the main screens.
+- Open **Порядок черт** from word cards, new-word previews, and practice answers to see how a character is written. Play the animation, slow it down, step through individual strokes, or swipe between characters. The viewer works offline and adapts to phones and tablets.
+- Use **Хочу заниматься ещё** to study up to five more new words after reaching the daily limit, or practice familiar words before their reviews are due. A full extra batch gives each of its five words two questions.
+- Open and search large word lists faster, scroll through every card, and return to your previous position when you switch back to Words.
+- Swipe between the main sections or use the floating navigation dock. Practice questions advance faster, with less waiting when an answer is saved.
+- Selected practice lists now sync across devices, along with individual word checkboxes. Update all devices to 2.4 to share practice-list choices.
 
-Install this update over the existing app using the same signing key to keep local data. Export a full backup in Settings before updating.
-
-**If you use cloud sync, update all your devices to 2.3 to preserve folder organization and visibility across devices.** Versions before 2.2 also cannot accept review intervals longer than 30 days.
+Export a full library backup in Settings before updating. Install the new APK over your existing app to keep your local data.

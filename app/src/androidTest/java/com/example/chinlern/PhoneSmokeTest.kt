@@ -64,7 +64,7 @@ class PhoneSmokeTest {
                     java.io.File(activity.cacheDir, "phone-words.png").outputStream().use { image.compress(Bitmap.CompressFormat.PNG, 100, it) }
                     image.recycle()
                 }
-                onView(withText("Наборы для практики: ${chosen.size} ▾")).perform(scrollTo(), click())
+                onView(libraryPracticePicker(chosen.size)).perform(scrollToLibraryControl(), click())
                 onView(withText("Наборы для практики")).check(matches(isDisplayed()))
                 onView(withText("Отмена")).perform(click())
                 scenario.onActivity { activity ->

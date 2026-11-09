@@ -1,0 +1,106 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, sans-serif;
+  color: #2b302b;
+  background: #f9f6ee;
+  font-size: 16px;
+}
+* { box-sizing: border-box; }
+html { touch-action: pan-y pinch-zoom; }
+body { margin: 0; min-height: 100vh; }
+main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 24px; }
+h1 { font-size: 36px; line-height: 1.25; margin: 8px 0; color: #244b44; overflow-wrap: anywhere; }
+p { line-height: 1.5; }
+.eyebrow { font-size: 11px; letter-spacing: 1.2px; color: #696d63; margin: 0; }
+#reading { margin: 0 0 18px; color: #696d63; font-size: 19px; overflow-wrap: anywhere; }
+.selection-title { color: #696d63; font-size: 14px; font-weight: 500; margin: 0 0 10px; }
+.form { margin: 0 0 12px; }
+.form-label { font-size: 14px; margin: 0 0 6px; color: #696d63; overflow-wrap: anywhere; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+button {
+  font: inherit; min-height: 48px; border: 1px solid #d6d7c9; border-radius: 14px;
+  background: #eaefe4; color: #244b44; padding: 10px 14px; cursor: pointer; touch-action: manipulation;
+}
+button:focus-visible, summary:focus-visible { outline: 3px solid #ad7e29; outline-offset: 3px; }
+button:disabled { opacity: .45; cursor: default; }
+.chip { font-size: 26px; min-width: 52px; padding: 6px 12px; }
+.chip[aria-pressed=true] { background: #244b44; color: white; border-color: #244b44; }
+.card { min-width: 0; background: #fff; border: 1px solid #e7e0d1; border-radius: 22px; padding: 16px; margin-top: 16px; }
+#position { margin: 0 0 12px; text-align: center; color: #696d63; font-size: 14px; }
+#stage {
+  position: relative; width: 100%; max-width: 360px; aspect-ratio: 1; margin: auto;
+  border: 1px solid #d7ccaf; border-radius: 12px; overflow: hidden; background: #fdfbf6;
+  touch-action: pan-y; user-select: none;
+}
+#grid { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+#grid path { fill: none; stroke: #e0d6bd; stroke-dasharray: 5 5; stroke-width: 1; }
+#target { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #244b44; }
+#target.fallback { font-family: serif; font-size: 100px; padding-bottom: 60px; }
+#unavailable { position: absolute; bottom: 8px; left: 16px; right: 16px; text-align: center; font-size: 15px; color: #696d63; margin: 0; }
+#status { min-height: 24px; text-align: center; color: #244b44; margin: 12px 0; }
+#swipe-hint { text-align: center; font-size: 12px; color: #696d63; margin: 0 0 12px; }
+.controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; max-width: 760px; margin: auto; }
+.controls button { min-width: 0; }
+.primary { background: #9f2936; color: white; border-color: #9f2936; }
+#slow[aria-pressed=true] { border: 2px solid #244b44; background: #dce7d4; }
+.help, details { color: #696d63; font-size: 14px; }
+.help { display: none; }
+summary { cursor: pointer; padding: 12px 0; min-height: 48px; }
+pre { font: 12px/1.5 monospace; white-space: pre-wrap; overflow-wrap: anywhere; background: #fff; padding: 12px; border-radius: 12px; }
+h2 { font-size: 16px; }
+/* Use the available window, including tablet portrait and split-screen windows. */
+@media (min-width: 720px) {
+  main {
+    display: grid; grid-template-columns: minmax(210px, 26%) minmax(0, 1fr);
+    align-items: start; gap: 0 28px; padding: 24px 28px;
+  }
+  .word-panel { min-width: 0; padding-top: 8px; }
+  h1 { font-size: 44px; margin: 12px 0; }
+  #reading { margin-bottom: 28px; }
+  .selection-title { margin-bottom: 12px; }
+  .chip { min-width: 60px; min-height: 60px; font-size: 30px; }
+  .help { display: block; margin-top: 24px; max-width: 30em; }
+  .card { margin: 0; padding: 20px; }
+  #stage { max-width: min(560px, max(260px, calc(100vh - 310px))); }
+  #credits { grid-column: 2; }
+}
+@media (min-width: 1100px) {
+  main { gap: 0 36px; padding: 24px 36px; }
+  .controls { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  #stage { max-width: min(560px, max(260px, calc(100vh - 275px))); }
+}
+@media (max-width: 340px) {
+  main { padding: 12px; }
+  .card { padding: 12px; }
+  .controls { grid-template-columns: 1fr; }
+}
+@media (max-width: 719px) {
+  header { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; column-gap: 12px; }
+  .eyebrow { grid-column: 1 / -1; }
+  h1 { font-size: 30px; }
+  #reading { margin: 0; }
+  .selection-title { margin-top: 8px; }
+}
+@media (max-width: 719px) and (min-height: 600px) {
+  #stage { max-width: min(360px, max(200px, calc(100vh - 440px))); }
+}
+/* Portrait tablets use their width for the character, rather than a sidebar. */
+@media (min-width: 600px) and (orientation: portrait) {
+  main { display: block; max-width: 860px; padding: 20px 28px 24px; }
+  .word-panel {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 48%);
+    align-items: center; column-gap: 24px; padding: 0;
+  }
+  header { display: block; grid-row: 1 / 3; }
+  h1 { font-size: 40px; margin: 8px 0; }
+  #reading { margin: 0; }
+  .selection-title { grid-column: 2; margin: 0 0 8px; }
+  #characters { grid-column: 2; display: flex; flex-wrap: wrap; gap: 12px 20px; }
+  #characters .form { min-width: 0; max-width: 100%; margin: 0; }
+  .form:last-child { margin-bottom: 0; }
+  .help { display: none; }
+  .card { margin-top: 20px; padding: 20px; }
+  #stage { max-width: min(640px, max(320px, calc(100vh - 380px))); }
+  .controls { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .controls button { font-size: 15px; padding: 10px; min-height: 52px; }
+}

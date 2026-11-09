@@ -7,6 +7,7 @@ import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.RootMatchers.isDialog
 import androidx.test.espresso.matcher.ViewMatchers.*
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -27,7 +28,8 @@ class PackImportUiTest {
             onView(withHint("Ответ модели (JSON)")).inRoot(isDialog()).check(matches(withText(json)))
             onView(withText("Проверить")).inRoot(isDialog()).perform(click())
             onView(withText("Создать набор")).inRoot(isDialog()).perform(click())
-            onView(withText("Набор: UI import test ▾")).check(matches(isDisplayed()))
+            onView(withText("Ваши слова")).check(matches(isDisplayed()))
+            scenario.onActivity { assertEquals("UI import test", StudyStore(it).packName) }
         }
     }
 }

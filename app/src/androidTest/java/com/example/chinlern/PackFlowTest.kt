@@ -29,7 +29,7 @@ class PackFlowTest {
         assertTrue(restored.engine.state(Task("water", Skill.CHARACTER_MEANING)).mastered)
         assertEquals(3, restored.engine.state(Task("water", Skill.CHARACTER_MEANING)).attempts)
     }
-    @Test fun overlappingWordsKeepSeparateProgressAndSelections() {
+    @Test fun overlappingWordsShareProgressAndKeepSeparateSelections() {
         val store = StudyStore(context)
         val task = Task("water", Skill.CHARACTER_MEANING)
         store.selected.clear(); store.selected.add("water")
@@ -48,7 +48,7 @@ class PackFlowTest {
         assertEquals(16, restored.words.size)
         assertEquals(setOf("water"), restored.selected)
         assertEquals(Fsrs.Phase.LEARNING, restored.engine.state(task).memory!!.phase)
-        assertEquals(0, restored.engine.state(task).errors)
+        assertEquals(1, restored.engine.state(task).errors)
         restored.switchPack(newId)
         restored.renamePack("Lesson renamed")
         assertEquals("Lesson renamed", StudyStore(context).packName)
@@ -79,7 +79,7 @@ class PackFlowTest {
             onView(withText("Применить")).perform(click())
             scenario.recreate()
             onView(libraryPracticePicker(2)).check(matches(isDisplayed()))
-            assertEquals(17, StudyStore(context).studyWords.size)
+            assertEquals(16, StudyStore(context).studyWords.size)
         }
     }
 }

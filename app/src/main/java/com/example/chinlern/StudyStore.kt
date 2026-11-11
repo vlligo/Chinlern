@@ -11,6 +11,100 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
     var onSyncDataChanged: (() -> Unit)? = null
     private var lastSyncSnapshot = ""
     private var encodedVocabulary: Pair<List<Word>, String>? = null
+    private var indexedVocabulary: Map<String, String>? = null
+    private var wordIndex = emptyMap<SharedWords.Identity, List<MixedStudy.Origin>>()
+    private val introductionKeys = mutableMapOf<SharedWords.Identity, String>()
+    private val sharedOverrides = mutableMapOf<SharedWords.Identity, MutableMap<Skill, Progress?>>()
+
+    private fun wordGroups(): Map<SharedWords.Identity, List<MixedStudy.Origin>> {
+        val vocabulary = packs.keys().asSequence().associateWith { id ->
+            if (id == activePackId) encodedWords() else packs.getJSONObject(id).getString("words")
+        }
+        if (vocabulary != indexedVocabulary) {
+            wordIndex = vocabulary.flatMap { (id, text) ->
+                decodedWords(text).map { SharedWords.identity(it) to MixedStudy.Origin(id, it.id) }
+            }.groupBy({ it.first }, { it.second })
+            indexedVocabulary = vocabulary
+            introductionKeys.keys.retainAll(wordIndex.keys)
+        }
+        return wordIndex
+    }
+
+    private fun wordAt(origin: MixedStudy.Origin): Word =
+        (if (origin.packId == activePackId) words else decodedWords(packs.getJSONObject(origin.packId).getString("words")))
+            .first { it.id == origin.wordId }
+
+    fun sharedPackNames(): Map<SharedWords.Identity, List<String>> = wordGroups().filterValues { it.size > 1 }
+        .mapValues { (_, members) -> members.map { it.packId }.distinct().map { id ->
+            packLabel(id, packs.getJSONObject(id).getString("name"))
+        } }
+
+    private fun stepFor(packId: String): Int = mixed?.let { session ->
+        session.sources.firstOrNull { it.id == packId }?.let { it.step + session.engine.step }
+    } ?: if (packId == activePackId) engine.step else packs.getJSONObject(packId).optInt("step")
+
+    /** Read live shared results without writing preferences (also used by the overview). */
+    private fun sharedProgress(): Map<MixedStudy.Origin, Map<Skill, Progress?>> {
+        val groups = wordGroups().filterValues { it.size > 1 }
+        if (groups.isEmpty()) return emptyMap()
+        val live = mixed?.let { session -> session.sources.associate { it.id to session.progressFor(it) } }.orEmpty()
+        return buildMap {
+            groups.forEach { (identity, members) ->
+                val combined = Skill.entries.associateWith { skill ->
+                    val override = sharedOverrides[identity]
+                    if (override?.containsKey(skill) == true) override[skill]
+                    else SharedWords.merge(members.mapNotNull { origin ->
+                        val key = Task(origin.wordId, skill).key
+                        val p = live[origin.packId]?.get(key) ?: if (origin.packId in live) null
+                        else if (origin.packId == activePackId) engine.progress[key]
+                        else packs.getJSONObject(origin.packId).optJSONObject("progress")?.optJSONObject(key)?.let(::readProgress)
+                        p?.copy(nextAt = (p.nextAt - stepFor(origin.packId)).coerceAtLeast(0))
+                    })
+                }
+                members.forEach { origin -> put(origin, combined) }
+            }
+        }
+    }
+
+    private fun reconcileSharedProgress() {
+        val shared = sharedProgress()
+        shared.forEach { (origin, states) -> states.forEach { (skill, relative) ->
+            val key = Task(origin.wordId, skill).key
+            val target = if (origin.packId == activePackId) null else packs.getJSONObject(origin.packId).getJSONObject("progress")
+            val previous = if (target == null) engine.progress[key] else target.optJSONObject(key)?.let(::readProgress)
+            if (previous?.copy(nextAt = (previous.nextAt - stepFor(origin.packId)).coerceAtLeast(0)) != relative) {
+                val updated = relative?.copy(nextAt = stepFor(origin.packId) + relative.nextAt)
+                if (target == null) {
+                    if (updated == null) engine.progress.remove(key) else engine.progress[key] = updated
+                } else if (updated == null) target.remove(key) else target.put(key, writeProgress(updated))
+            }
+        } }
+        mixed?.let { session -> session.origins.forEach { (id, origin) ->
+            shared[origin]?.forEach { (skill, relative) ->
+                val key = Task(id, skill).key
+                if (relative == null) session.engine.progress.remove(key)
+                else session.engine.progress[key] = relative.copy(nextAt = session.engine.step + relative.nextAt)
+            }
+        } }
+        sharedOverrides.clear()
+    }
+
+    private fun shareResult(word: Word, skill: Skill, progress: Progress?, step: Int) {
+        sharedOverrides.getOrPut(SharedWords.identity(word)) { mutableMapOf() }[skill] =
+            progress?.takeIf { it.copy(nextAt = 0) != Progress() }?.copy(nextAt = (progress.nextAt - step).coerceAtLeast(0))
+    }
+
+    private fun progressAt(origin: MixedStudy.Origin, skill: Skill): Progress? {
+        mixed?.let { session ->
+            val id = session.occurrences.entries.firstOrNull { origin in it.value }?.key
+            if (id != null) return session.engine.progress[Task(id, skill).key]?.let { p ->
+                p.copy(nextAt = session.sources.first { it.id == origin.packId }.step + p.nextAt)
+            }
+        }
+        val key = Task(origin.wordId, skill).key
+        return if (origin.packId == activePackId) engine.progress[key]?.copy()
+        else packs.getJSONObject(origin.packId).optJSONObject("progress")?.optJSONObject(key)?.let(::readProgress)
+    }
 
     private fun encodedWords(): String {
         val cached = encodedVocabulary
@@ -145,6 +239,8 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
     var session = JSONObject(prefs.getString("shortSession", "{}")!!)
         private set
     val shortSession get() = session.optBoolean("active")
+    // Older extra-learning sessions stored "balanced"; resume them with normal scheduling too.
+    val sessionUsesSchedule get() = session.optBoolean("scheduled", session.optBoolean("balanced"))
     val sessionCount get() = session.optInt("count")
     val sessionCorrect get() = session.optInt("correct")
     val sessionFinished get() = shortSession && (session.optBoolean("finished") ||
@@ -161,13 +257,13 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         if (!stale) return false
         val timed = shortSession && session.optLong("until") > 0
         val focus = session.optJSONArray("tasks")?.strings()?.mapNotNull { parseTask(it) }
-        val balanced = session.optBoolean("balanced")
+        val scheduled = sessionUsesSchedule
         val restartShort = shortSession && !session.optBoolean("finished") &&
             (session.optInt("limit") == 0 || sessionCount < session.optInt("limit"))
         clearQuestion()
         studyEngine.previous = null
         // A fresh session must never reset memory strength, learning steps or real due times.
-        if (restartShort) beginSession(timed, focus, balanced)
+        if (restartShort) beginSession(timed, focus, scheduled)
         else { session = JSONObject(); practiceDay = today(); touchPractice(); save() }
         return true
     }
@@ -177,13 +273,17 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
     }
     private fun today() = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).format(java.util.Date(clock()))
     private fun introductionKey(word: Word): String {
-        val origin = mixedStudy()?.origins?.get(word.id)
-        return "${origin?.packId ?: activePackId}/${origin?.wordId ?: word.id}"
+        // Identity is stable across packs, imports and changes to notes/examples.
+        val identity = SharedWords.identity(word)
+        return introductionKeys.getOrPut(identity) {
+            "word:" + JSONObject().put("forms", JSONArray(identity.forms)).put("pinyin", identity.pronunciation)
+                .put("meanings", JSONArray(identity.meanings)).toString()
+        }
     }
     fun needsPreview(word: Word) = !introductions.has(introductionKey(word)) &&
         Skill.entries.none { studyEngine.progress[Task(word.id, it).key]?.let { p -> p.attempts > 0 || p.mastered } == true }
     fun introduce(word: Word) { touchPractice(); introductions.put(introductionKey(word), today()); savePractice() }
-    /** Explicit extra practice uses the existing focused-session path, without changing the daily pace. */
+    /** Extra practice expands eligibility while retaining normal scheduling and the daily setting. */
     fun extraStudyTasks(newWords: Boolean, writing: Boolean = this.writing): List<Task> {
         // Generate against the full selection to preserve ambiguity and audio exclusions.
         // A finished focused session exposes only its own words through studyWords.
@@ -199,7 +299,7 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         val focus = extraStudyTasks(newWords, writing)
         if (focus.isEmpty()) return false
         this.writing = writing
-        beginSession(focus = focus, balanced = newWords)
+        beginSession(focus = focus, scheduled = true)
         return true
     }
     private fun eligibleWords(words: List<Word>): List<Word> {
@@ -210,13 +310,13 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         val fresh = words.filter { needsPreview(it) }.take((dailyNewWords - used).coerceAtLeast(0)).map { it.id }.toSet()
         return words.filter { !needsPreview(it) || it.id in fresh }
     }
-    fun beginSession(minutes: Boolean = false, focus: List<Task>? = null, balanced: Boolean = false) {
+    fun beginSession(minutes: Boolean = false, focus: List<Task>? = null, scheduled: Boolean = false) {
         practiceDay = today()
         touchPractice()
         clearQuestion()
         session = JSONObject().put("active", true).put("limit", if (minutes) 0 else 10)
             .put("until", if (minutes) clock() + 300_000L else 0L)
-            .put("count", 0).put("correct", 0).put("balanced", balanced)
+            .put("count", 0).put("correct", 0).put("scheduled", scheduled)
         focus?.let { session.put("tasks", JSONArray(it.map { task -> task.key })) }
         save()
     }
@@ -238,6 +338,7 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
             saved.keys().forEach { key -> engine.progress[key] = readProgress(saved.getJSONObject(key)) }
             engine.step = prefs.getInt("step", 0)
             engine.previous = parseTask(prefs.getString("previous", null))
+            reconcileSharedProgress()
             current = parseTask(prefs.getString("current", null))?.takeIf { t -> studyWords.any { it.id == t.wordId } }
             feedback = when (prefs.getInt("feedback", -1)) { 1 -> true; 0 -> false; else -> null }
             revealed = prefs.getBoolean("revealed", false)
@@ -250,7 +351,27 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
             answerUndo = prefs.getString("answerUndo", null)?.let { JSONObject(it) }
             if (current == null || feedback == null) { answerUndo = null; answerIgnored = false }
         } catch (_: Exception) { current = null; feedback = null; draft = "" }
+        if (prefs.getInt("sharedWordsVersion", 0) < 1) {
+            // Old mixed IDs may point at removed duplicate entries. Preserve results, restart prompts.
+            val hasDuplicates = wordGroups().values.any { it.size > 1 }
+            if (hasDuplicates) {
+                prefs.edit().putString("beforeSharedWords", prefs.getString("packs", "{}")).apply()
+                session = JSONObject(); mixed = null; mixedPrevious = null; clearQuestion()
+            }
+            migrateIntroductions()
+            prefs.edit().putInt("sharedWordsVersion", 1).putString("introductions", introductions.toString()).apply()
+            if (hasDuplicates) save()
+        }
         refreshPractice()
+    }
+
+    private fun migrateIntroductions() {
+        wordGroups().forEach { (_, members) ->
+            val key = introductionKey(wordAt(members.first()))
+            val dates = members.mapNotNull { origin -> introductions.optString("${origin.packId}/${origin.wordId}").takeIf { it.isNotEmpty() } }
+            (dates + listOfNotNull(introductions.optString(key).takeIf { it.isNotEmpty() })).minOrNull()?.let { introductions.put(key, it) }
+            members.forEach { introductions.remove("${it.packId}/${it.wordId}") }
+        }
     }
     private fun mixedStudy(): MixedStudy? {
         if (practicePackIds == setOf(activePackId)) return null
@@ -292,12 +413,15 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
     fun libraryPacks(): List<LibraryPack> {
         // Inspect live state without saving/serializing the entire library just to display it.
         val mixedProgress = mixed?.let { session -> session.sources.associate { it.id to session.progressFor(it) } }.orEmpty()
+        val shared = sharedProgress()
         return packNames.filter { it.first in practicePackIds }.map { (id, name) ->
             val pack = packs.getJSONObject(id)
             val vocabulary = if (id == activePackId) words.toList() else decodedWords(pack.getString("words"))
             val liveProgress = mixedProgress[id] ?: if (id == activePackId) engine.progress else null
             val progress = pack.optJSONObject("progress")
-            fun mastered(task: Task): Boolean = if (liveProgress != null) liveProgress[task.key]?.mastered == true
+            fun mastered(task: Task): Boolean = if (shared.containsKey(MixedStudy.Origin(id, task.wordId)))
+                shared.getValue(MixedStudy.Origin(id, task.wordId))[task.skill]?.mastered == true
+                else if (liveProgress != null) liveProgress[task.key]?.mastered == true
                 else progress?.optJSONObject(task.key)?.optBoolean("mastered") == true
             val recognition = LearningEngine().tasks(vocabulary, false, true).groupBy { it.wordId }
             LibraryPack(id, name, vocabulary, if (id == activePackId) selected.toSet() else pack.getJSONArray("selected").strings().toSet(),
@@ -314,14 +438,16 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         require(vocabulary.any { it.id == wordId }) { "Слово не найдено." }
         // Flush mixed practice before changing a source pack, so its cache cannot undo the mark.
         invalidatePractice()
-        if (packId == activePackId) engine.setKnown(wordId, category, known)
+        val target: LearningEngine
+        if (packId == activePackId) { target = engine; engine.setKnown(wordId, category, known, clock()) }
         else {
             val progress = packs.getJSONObject(packId).getJSONObject("progress")
-            val target = LearningEngine(progress.keys().asSequence().associateWith { readProgress(progress.getJSONObject(it)) }.toMutableMap())
+            target = LearningEngine(progress.keys().asSequence().associateWith { readProgress(progress.getJSONObject(it)) }.toMutableMap())
             target.step = packs.getJSONObject(packId).optInt("step")
-            target.setKnown(wordId, category, known)
+            target.setKnown(wordId, category, known, clock())
             target.progress.forEach { (key, value) -> progress.put(key, writeProgress(value)) }
         }
+        category.skills.forEach { shareResult(vocabulary.first { it.id == wordId }, it, target.progress[Task(wordId, it).key], target.step) }
         save()
     }
 
@@ -367,17 +493,44 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
 
     fun invalidatePractice() { session = JSONObject(); flushMixed(); mixed = null; mixedPrevious = null; clearQuestion() }
     fun addStudySynonym(word: Word, meaning: String) {
-        val updated = word.copy(meanings = (word.meanings + meaning).distinct())
-        val session = mixed
-        if (session == null) words[words.indexOfFirst { it.id == word.id }] = updated
-        else {
-            val origin = session.origins.getValue(word.id)
-            session.words[session.words.indexOfFirst { it.id == word.id }] = updated
-            if (origin.packId == activePackId) words[words.indexOfFirst { it.id == origin.wordId }] = updated.copy(id = origin.wordId)
-            else {
-                val pack = packs.getJSONObject(origin.packId)
-                pack.put("words", encodeWords(decodedWords(pack.getString("words")).map { if (it.id == origin.wordId) updated.copy(id = origin.wordId) else it }))
+        // An accepted answer belongs to the shared word; keep each occurrence's examples and notes.
+        val members = wordGroups().getValue(SharedWords.identity(word))
+        val oldSession = mixed
+        flushMixed()
+        members.groupBy { it.packId }.forEach { (id, occurrences) ->
+            val ids = occurrences.map { it.wordId }.toSet()
+            val vocabulary = if (id == activePackId) words else decodedWords(packs.getJSONObject(id).getString("words"))
+            val updated = vocabulary.map { if (it.id in ids) it.copy(meanings = (it.meanings + meaning).distinct()) else it }
+            if (id == activePackId) words = updated.toMutableList()
+            else packs.getJSONObject(id).put("words", encodeWords(updated))
+        }
+        // A newly accepted meaning can make a previously separate card identical, too.
+        current?.let { task -> answerUndo?.let { undo ->
+            val entries = undo.optJSONArray("shared") ?: JSONArray().put(JSONObject()
+                .put("pack", undo.getString("pack")).put("key", undo.getString("key"))
+                .put("progress", undo.opt("progress")))
+            val captured = (0 until entries.length()).map { entries.getJSONObject(it).let { it.getString("pack") to it.getString("key") } }.toSet()
+            wordGroups()[SharedWords.identity(word.copy(meanings = (word.meanings + meaning).distinct()))].orEmpty().forEach { origin ->
+                val key = Task(origin.wordId, task.skill).key
+                if (origin.packId to key !in captured) entries.put(JSONObject().put("pack", origin.packId).put("key", key)
+                    .put("progress", progressAt(origin, task.skill)?.let(::writeProgress) ?: JSONObject.NULL))
             }
+            undo.put("shared", entries)
+        } }
+        mixed = null
+        reconcileSharedProgress()
+        if (oldSession != null) {
+            val rebuilt = mixedStudy()!!
+            fun remap(task: Task?): Task? = task?.let { old ->
+                val origin = oldSession.origins[old.wordId]
+                rebuilt.occurrences.entries.firstOrNull { origin in it.value }?.let { Task(it.key, old.skill) }
+            }
+            current = remap(current)
+            rebuilt.engine.previous = remap(oldSession.engine.previous)
+            mixedPrevious = rebuilt.engine.previous
+            listOf("tasks", "reviewed").forEach { field -> session.optJSONArray(field)?.let { entries ->
+                session.put(field, JSONArray(entries.strings().mapNotNull { remap(parseTask(it))?.key }.distinct()))
+            } }
         }
     }
     /** Capture persistent pack coordinates, so rollback also works after mixed queues rebase on reload. */
@@ -402,12 +555,19 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
             .put("progress", previousProgress ?: JSONObject.NULL)
             .put("steps", steps).put("previous", studyEngine.previous?.key ?: JSONObject.NULL)
             .put("activePrevious", engine.previous?.key ?: JSONObject.NULL)
+        val word = studyWords.first { it.id == task.wordId }
+        val members = wordGroups()[SharedWords.identity(word)].orEmpty()
+        if (members.size > 1) answerUndo!!.put("shared", JSONArray(members.map { member ->
+            JSONObject().put("pack", member.packId).put("key", Task(member.wordId, task.skill).key)
+                .put("progress", progressAt(member, task.skill)?.takeIf { it != Progress() }?.let(::writeProgress) ?: JSONObject.NULL)
+        }))
         beforeAnswer = studyEngine.state(task).copy()
         studyEngine.answer(task, correct, now = clock(), retention = desiredRetention)
         if (!correct && task.skill in characterSkills && draft in choices) {
             val state = studyEngine.state(task)
             state.confusions = state.confusions + (draft to ((state.confusions[draft] ?: 0) + 1))
         }
+        shareResult(word, task.skill, studyEngine.progress[task.key], studyEngine.step)
         if (shortSession) {
             this.session.put("count", sessionCount + 1).put("correct", sessionCorrect + if (correct) 1 else 0)
             if (this.session.has("tasks")) this.session.put("reviewed",
@@ -427,6 +587,12 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         val key = undo.getString("key")
         if (undo.isNull("progress")) target.remove(key)
         else target.put(key, JSONObject(undo.getJSONObject("progress").toString()))
+        undo.optJSONArray("shared")?.let { entries -> repeat(entries.length()) { index ->
+            val entry = entries.getJSONObject(index)
+            val saved = packs.optJSONObject(entry.getString("pack"))?.getJSONObject("progress") ?: return@repeat
+            if (entry.isNull("progress")) saved.remove(entry.getString("key"))
+            else saved.put(entry.getString("key"), JSONObject(entry.getJSONObject("progress").toString()))
+        } }
         val steps = undo.getJSONObject("steps")
         steps.keys().forEach { id -> packs.getJSONObject(id).put("step", steps.getInt(id)) }
         val active = packs.getJSONObject(activePackId)
@@ -473,16 +639,12 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         val available = tasks()
         val explicitFocus = shortSession && session.has("tasks")
         val reviewed = session.optJSONArray("reviewed")?.strings()?.toSet().orEmpty()
-        val candidates = if (explicitFocus) available.filter { it.key !in reviewed } else available
-        // An extra-learning batch gives every word a turn before a second question about any word.
-        // Otherwise due learning steps can consume all ten answers on the first one or two words.
-        val balanced = if (session.optBoolean("balanced") && candidates.isNotEmpty()) {
-            val counts = reviewed.groupingBy { it.substringBefore(':') }.eachCount()
-            val least = candidates.minOf { counts[it.wordId] ?: 0 }
-            candidates.filter { (counts[it.wordId] ?: 0) == least }
-        } else candidates
-        current = studyEngine.next(balanced, now = clock())
-            ?: if (explicitFocus) balanced.firstOrNull { it.wordId != studyEngine.previous?.wordId } ?: balanced.firstOrNull() else null
+        val manualDrill = explicitFocus && !sessionUsesSchedule
+        val candidates = if (manualDrill) available.filter { it.key !in reviewed } else available
+        // Extras use the same due times, learning priority and sibling spacing as normal practice.
+        // Only explicitly chosen drills can force an early review once per skill.
+        current = studyEngine.next(candidates, now = clock())
+            ?: if (manualDrill) candidates.firstOrNull { it.wordId != studyEngine.previous?.wordId } ?: candidates.firstOrNull() else null
         if (current == null && shortSession) session.put("finished", true)
         current?.let { task ->
             val word = studyWords.first { it.id == task.wordId }
@@ -513,6 +675,7 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         if (lastPracticeAt == 0L && (current != null || shortSession)) touchPractice()
         mixed?.let { mixedPrevious = it.engine.previous }
         flushMixed()
+        reconcileSharedProgress()
         val progressJson = JSONObject()
         engine.progress.filterValues { it != Progress() }.forEach { (key, p) -> progressJson.put(key, writeProgress(p)) }
         val vocabulary = encodedWords()
@@ -591,7 +754,9 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
             if (packs.getJSONObject(id).optBoolean("practice", id in previousPractice)) practicePackIds.add(id)
         }
         normalizePracticePacks()
-        val mixedChanged = previousPractice != practicePackIds || previousPractice.any { current[it] != merged.packs[it] }
+        val sharedChanged = wordGroups().values.any { members -> members.size > 1 &&
+            members.any { current[it.packId] != merged.packs[it.packId] } }
+        val mixedChanged = sharedChanged || previousPractice != practicePackIds || previousPractice.any { current[it] != merged.packs[it] }
         if (mixedChanged || oldActive != merged.packs[activePackId]) mixed = null
         if (oldActive != merged.packs[activePackId]) {
             val pack = packs.getJSONObject(activePackId)
@@ -703,10 +868,15 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         invalidatePractice()
         incoming.forEach { validate(it) }
         val replacements = incoming.associateBy { it.id }
+        val previousWords = words.associateBy { it.id }
         val oldIds = words.map { it.id }.toSet()
         words = (words.map { replacements[it.id] ?: it } + incoming.filter { it.id !in oldIds }).toMutableList()
         selected.addAll(replacements.keys)
-        engine.progress.keys.removeAll { key -> key.substringBefore(':') in replacements }
+        val changedLearning = incoming.filter { updated ->
+            val old = previousWords[updated.id]
+            old == null || SharedWords.identity(old) != SharedWords.identity(updated)
+        }.map { it.id }.toSet()
+        engine.progress.keys.removeAll { key -> key.substringBefore(':') in changedLearning }
         clearQuestion()
         save()
     }
@@ -749,23 +919,47 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
     data class PackOverview(val name: String, val total: Int, val introduced: Int, val learned: Int,
         val mastered: Int, val due: Int, val skills: Map<Skill, List<Progress>>)
 
-    fun overview(): List<PackOverview> {
-        save()
-        val now = System.currentTimeMillis()
-        return packNames.map { (id, name) ->
+    fun overview(includeTotal: Boolean = false): List<PackOverview> {
+        // The pager prepares Progress even when it is offscreen. Reading it must not
+        // serialize review histories, write preferences, or trigger cloud sync.
+        val mixedProgress = mixed?.let { session -> session.sources.associate { it.id to session.progressFor(it) } }.orEmpty()
+        val shared = sharedProgress()
+        val uniqueTasks = mutableMapOf<Pair<SharedWords.Identity, Skill>, Progress>()
+        val introduced = mutableSetOf<SharedWords.Identity>()
+        val uniqueWords = mutableSetOf<SharedWords.Identity>()
+        val now = clock()
+        val result = packNames.map { (id, name) ->
             val pack = packs.getJSONObject(id)
-            val vocabulary = decodedWords(pack.getString("words"))
-            val saved = pack.getJSONObject("progress")
-            val progress = saved.keys().asSequence().associateWith { readProgress(saved.getJSONObject(it)) }
-            val tasks = LearningEngine().tasks(vocabulary, false, true) + LearningEngine().tasks(vocabulary, true, false)
+            val vocabulary = if (id == activePackId) words else decodedWords(pack.getString("words"))
+            val progress = mixedProgress[id] ?: if (id == activePackId) engine.progress else {
+                val saved = pack.getJSONObject("progress")
+                saved.keys().asSequence().associateWith { readProgress(saved.getJSONObject(it)) }
+            }
+            val taskEngine = if (id == activePackId) engine else LearningEngine()
+            val tasks = taskEngine.tasks(vocabulary, false, true) + taskEngine.tasks(vocabulary, true, false)
             val tasksByWord = tasks.groupBy { it.wordId }
+            fun state(task: Task): Progress? = shared[MixedStudy.Origin(id, task.wordId)]?.let { it[task.skill] } ?: progress[task.key]
+            fun isIntroduced(word: Word) = introductions.has(introductionKey(word)) ||
+                Skill.entries.any { state(Task(word.id, it))?.let { p -> p.attempts > 0 || p.mastered } == true }
+            if (includeTotal) vocabulary.forEach { word ->
+                val identity = SharedWords.identity(word)
+                uniqueWords.add(identity)
+                if (isIntroduced(word)) introduced.add(identity)
+                tasksByWord[word.id].orEmpty().forEach { task -> uniqueTasks[identity to task.skill] = state(task) ?: Progress() }
+            }
             PackOverview(name, vocabulary.size,
-                vocabulary.count { w -> introductions.has("$id/${w.id}") || Skill.entries.any { progress[Task(w.id, it).key]?.let { p -> p.attempts > 0 || p.mastered } == true } },
-                vocabulary.count { w -> tasksByWord[w.id].orEmpty().all { progress[it.key]?.mastered == true } },
-                tasks.count { progress[it.key]?.mastered == true },
-                tasks.count { progress[it.key]?.let { p -> p.due > 0 && p.due <= now } == true },
-                tasks.groupBy { it.skill }.mapValues { (_, values) -> values.map { progress[it.key] ?: Progress() } })
+                vocabulary.count(::isIntroduced),
+                vocabulary.count { w -> tasksByWord[w.id].orEmpty().all { state(it)?.mastered == true } },
+                tasks.count { state(it)?.mastered == true },
+                tasks.count { state(it)?.let { p -> p.due > 0 && p.due <= now } == true },
+                tasks.groupBy { it.skill }.mapValues { (_, values) -> values.map { state(it) ?: Progress() } })
         }
+        if (!includeTotal) return result
+        val byWord = uniqueTasks.entries.groupBy { it.key.first }
+        return result + PackOverview("Все наборы", uniqueWords.size, introduced.size,
+            uniqueWords.count { byWord[it].orEmpty().all { entry -> entry.value.mastered } },
+            uniqueTasks.values.count { it.mastered }, uniqueTasks.values.count { it.due > 0 && it.due <= now },
+            uniqueTasks.entries.groupBy { it.key.second }.mapValues { (_, entries) -> entries.map { it.value } })
     }
 
     companion object {

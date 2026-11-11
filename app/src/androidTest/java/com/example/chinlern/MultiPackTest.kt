@@ -21,9 +21,9 @@ class MultiPackTest {
         store.importPack("Second", listOf(water))
         val secondId = store.activePackId
         store.choosePracticePacks(setOf(firstId, secondId))
-        assertEquals(2, store.studyWords.size)
+        assertEquals(1, store.studyWords.size)
         val tasks = store.tasks().filter { it.skill == Skill.CHARACTER_MEANING }
-        assertEquals(2, tasks.size)
+        assertEquals(1, tasks.size)
         store.studyEngine.answer(tasks.first(), false, delay=5)
         store.current = tasks.first(); store.feedback = false; store.save()
         val firstSnapshot = store.syncSnapshot()
@@ -33,7 +33,7 @@ class MultiPackTest {
         assertEquals(tasks.first(), reloaded.current)
         assertEquals(false, reloaded.feedback)
         assertEquals(1, reloaded.studyEngine.state(tasks.first()).errors)
-        assertEquals(0, reloaded.studyEngine.state(tasks.last()).attempts)
+        assertEquals(1, reloaded.studyEngine.state(tasks.single()).attempts)
         reloaded.save(); reloaded.save()
         assertEquals(firstSnapshot, reloaded.syncSnapshot())
         reloaded.choosePracticePacks(setOf(firstId))
@@ -41,7 +41,8 @@ class MultiPackTest {
         val firstErrors = reloaded.engine.state(Task(water.id, Skill.CHARACTER_MEANING)).errors
         reloaded.switchPack(secondId)
         val secondErrors = reloaded.engine.state(Task(water.id, Skill.CHARACTER_MEANING)).errors
-        assertEquals(1, firstErrors + secondErrors)
+        assertEquals(1, firstErrors)
+        assertEquals(1, secondErrors)
     }
     @Test fun mixedSyncAndWordSelectionDoNotLoseProgress() {
         val store = StudyStore(context)

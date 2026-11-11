@@ -123,7 +123,7 @@ class MainActivity : AppCompatActivity() {
     }
     private fun previewFileBatch(items: List<PackFiles.Item>, errors: List<String>, owner: String?) {
         val box = column().apply { setPadding(dp(24), dp(12), dp(24), dp(16)) }
-        box.add(label("Готово наборов: ${items.size}. Каждый станет отдельным набором с новым прогрессом.", 16f))
+        box.add(label("Готово наборов: ${items.size}. Каждый станет отдельным набором. У одинаковых карточек будет общий прогресс.", 16f))
         val selected = items.map { item ->
             CheckBox(this).apply {
                 text = "${item.preview.name} · ${item.preview.words.size} слов\n${item.source}"
@@ -195,7 +195,7 @@ class MainActivity : AppCompatActivity() {
             val owner = profileUid
             val preview = store.previewBackup(data)
             MaterialAlertDialogBuilder(this).setTitle("Объединить данные?")
-                .setMessage("Новых наборов: ${preview.added}. Дополнений: ${preview.updated}. Отдельных версий: ${preview.conflicts}.\n\nСуществующие слова и результаты сохранятся. Если результаты одного задания отличаются, версия из файла сохранится в отдельном наборе. Повторный импорт того же файла не удваивает результаты.")
+                .setMessage("Новых наборов: ${preview.added}. Дополнений: ${preview.updated}. Отдельных версий: ${preview.conflicts}.\n\nВерсии карточек из файла сохраняются отдельными наборами. У одинаковых карточек прогресс общий: используется последнее расписание повторений, счётчики попыток не складываются. Повторный импорт того же файла не удваивает результаты.")
                 .setNegativeButton("Отмена", null)
                 .setPositiveButton("Объединить") { _, _ ->
                     try {
@@ -659,10 +659,10 @@ class MainActivity : AppCompatActivity() {
         }
         startShort(false, focus)
     }
-    private fun startShort(minutes: Boolean, focus: List<Task>? = null, writing: Boolean = false, balanced: Boolean = false) {
+    private fun startShort(minutes: Boolean, focus: List<Task>? = null, writing: Boolean = false, scheduled: Boolean = false) {
         if (focus?.isEmpty() ?: store.selectedStudyWords.isEmpty()) { toast("Выберите хотя бы одно слово"); return }
         store.writing = writing
-        store.beginSession(minutes, focus, balanced)
+        store.beginSession(minutes, focus, scheduled)
         store.route = "quiz"; store.nextQuestion(); render()
     }
     private fun startExtra(newWords: Boolean, writing: Boolean) {
@@ -699,7 +699,7 @@ class MainActivity : AppCompatActivity() {
         }
         content.add(button("Ещё 10 вопросов", true) {
             val focus = store.session.optJSONArray("tasks")?.let { json -> (0 until json.length()).map { json.getString(it) }.toSet() }
-            startShort(false, focus?.let { keys -> store.tasks().filter { it.key in keys } }, store.writing, store.session.optBoolean("balanced"))
+            startShort(false, focus?.let { keys -> store.tasks().filter { it.key in keys } }, store.writing, store.sessionUsesSchedule)
         }, 12)
         extraPractice(content)
         content.add(button("Трудные слова") { store.leaveSession(); store.route = "stats"; render() }, 8)
@@ -919,7 +919,7 @@ class MainActivity : AppCompatActivity() {
     }
     private fun acceptSynonym(word: Word, task: Task) {
         MaterialAlertDialogBuilder(this).setTitle("Добавить синоним?")
-            .setMessage("«${store.draft}» будет приниматься как перевод «${word.hanzi}». Этот ответ станет верным, а ошибочная отметка будет отменена.")
+            .setMessage("«${store.draft}» будет приниматься как перевод «${word.hanzi}» во всех наборах с такой же карточкой. Этот ответ станет верным, а ошибочная отметка будет отменена.")
             .setPositiveButton("Засчитать") { _, _ ->
                 if (!store.correctAnswer()) return@setPositiveButton
                 store.addStudySynonym(word, store.draft.trim())
@@ -987,7 +987,7 @@ class MainActivity : AppCompatActivity() {
     }
     private fun previewImport(preview: PackImport.Preview, created: () -> Unit = {}) {
         val box = column().apply { setPadding(dp(24), dp(8), dp(24), dp(16)) }
-        box.add(label("${preview.words.size} слов. Создадим отдельный набор с новым прогрессом. Другие наборы сохранятся.", 15f, muted))
+        box.add(label("${preview.words.size} слов. Создадим отдельный набор. Слова с одинаковыми написанием, произношением и переводами получат общий прогресс с существующими карточками. Остальные слова начнутся с нуля.", 15f, muted))
         var importDialog: AlertDialog? = null
         val warnings = store.duplicateWarnings(preview.words)
         if (warnings.isNotEmpty()) box.add(label("Возможные дубликаты (${warnings.size}):\n${warnings.take(20).joinToString("\n")}", 15f, red), 12)
@@ -1362,10 +1362,11 @@ class MainActivity : AppCompatActivity() {
         })
         content.twoButtons(button("Выбрать все") { store.selectLibraryWords(true); render() }, button("Снять выбор") { store.selectLibraryWords(false); render() })
         // Read the library once. Searching and updating counters must not serialize progress again.
-        val entries = store.libraryPacks().flatMap { pack -> pack.words.map { word -> LibraryEntry(pack, word) } }
+        val sharedPacks = store.sharedPackNames()
+        val entries = store.libraryPacks().flatMap { pack -> pack.words.map { word -> LibraryEntry(pack, word, sharedPacks[SharedWords.identity(word)].orEmpty()) } }
         var selectedCount = entries.count { it.selected }
         fun selectionText() = "Выбрано $selectedCount из ${entries.size}"
-        content.add(label("Отметьте отдельно: «Узнаю слово» — знание значения, пиньиня и произношения; «Умею писать» — написание по памяти. Отмеченные навыки считаются закреплёнными и вернутся на повторение завтра. Снимите отметку, чтобы учить их снова. Отметки действуют в этом наборе.", 13f, muted), 12)
+        content.add(label("Отметьте отдельно: «Узнаю слово» — знание значения, пиньиня и произношения; «Умею писать» — написание по памяти. Отмеченные навыки вернутся на повторение завтра. У одинаковых слов прогресс общий во всех наборах. Выбор «Учить» остаётся отдельным; в совместной практике слово появляется один раз.", 13f, muted), 12)
         val selectedLabel = label(selectionText(), 14f, jade)
         content.add(selectedLabel, 16)
         val search = field("Найти слово, пиньинь или перевод", "", content)
@@ -1382,11 +1383,17 @@ class MainActivity : AppCompatActivity() {
                     gravity = Gravity.TOP
                     setPadding(0, dp(12), 0, 0)
                     tag = List(columns) { index ->
-                        LibraryWordCard { checked ->
+                        LibraryWordCard(onSelectionChanged = { checked ->
                             selectedCount += if (checked) 1 else -1
                             selectedLabel.text = selectionText()
                             selectionLabel?.text = "${store.studyWords.size} слов"
-                        }.also { holder ->
+                        }, onKnowledgeChanged = { word, category, checked ->
+                            val identity = SharedWords.identity(word)
+                            entries.filter { SharedWords.identity(it.word) == identity }.forEach { entry ->
+                                if (category == WordKnowledge.RECOGNITION) entry.recognized = checked else entry.writable = checked
+                            }
+                            notifyDataSetChanged()
+                        }).also { holder ->
                             addView(holder.view, LinearLayout.LayoutParams(0, -2, 1f).apply {
                                 if (index < columns - 1) marginEnd = dp(14)
                             })
@@ -1427,14 +1434,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private class LibraryEntry(val pack: StudyStore.LibraryPack, val word: Word) {
+    private class LibraryEntry(val pack: StudyStore.LibraryPack, val word: Word, val sharedPacks: List<String>) {
         var selected = word.id in pack.selected
         var recognized = word.id in pack.recognized
         var writable = word.id in pack.writable
         val searchText by lazy { Answers.meaning("${pack.name} ${word.hanzi} ${word.pinyin} ${word.numbered} ${word.meanings.joinToString(" ")}") }
     }
 
-    private inner class LibraryWordCard(onSelectionChanged: (Boolean) -> Unit) {
+    private inner class LibraryWordCard(onSelectionChanged: (Boolean) -> Unit,
+        onKnowledgeChanged: (Word, WordKnowledge, Boolean) -> Unit) {
         val view = card()
         private lateinit var entry: LibraryEntry
         private var binding = false
@@ -1456,6 +1464,7 @@ class MainActivity : AppCompatActivity() {
                 setOnCheckedChangeListener { _, checked -> if (!binding) {
                     store.setWordKnown(entry.pack.id, entry.word.id, category, checked)
                     if (category == WordKnowledge.RECOGNITION) entry.recognized = checked else entry.writable = checked
+                    onKnowledgeChanged(entry.word, category, checked)
                     refreshAdjacentSections()
                 } }
             }
@@ -1485,7 +1494,7 @@ class MainActivity : AppCompatActivity() {
             binding = true
             entry = value
             val (pack, word) = value.pack to value.word
-            packLabel.text = pack.name
+            packLabel.text = pack.name + if (entry.sharedPacks.size > 1) "\nОбщий прогресс: ${entry.sharedPacks.joinToString(", ")}" else ""
             title.text = "${word.hanzi}   ${word.pinyin}"
             meaning.text = word.meanings.joinToString(" / ")
             selected.contentDescription = "Учить ${word.hanzi} · ${pack.name}"
@@ -1499,14 +1508,16 @@ class MainActivity : AppCompatActivity() {
     }
     private fun stats() {
         heading("Прогресс", "Обзор всей библиотеки и подробности по набору.")
-        val overview = store.overview()
+        val summaries = store.overview(includeTotal = true)
+        val overview = summaries.dropLast(1)
+        val total = summaries.last()
         val combined = card()
-        combined.add(label("Все наборы · ${overview.sumOf { it.total }} слов", 22f, jade, true))
-        combined.add(label("Введено: ${overview.sumOf { it.introduced }} · Слов изучено: ${overview.sumOf { it.learned }}\nНавыков закреплено: ${overview.sumOf { it.mastered }} · Повторений пора: ${overview.sumOf { it.due }}", 17f), 12)
-        combined.add(label("Слово изучено, когда закреплены все доступные направления, включая письмо и аудирование. Повторения считаются по навыкам. Одинаковые слова в разных наборах учитываются отдельно.", 13f, muted), 8)
+        combined.add(label("Все наборы · ${total.total} уникальных слов", 22f, jade, true))
+        combined.add(label("Введено: ${total.introduced} · Слов изучено: ${total.learned}\nНавыков закреплено: ${total.mastered} · Повторений пора: ${total.due}", 17f), 12)
+        combined.add(label("Слово изучено, когда закреплены все доступные направления, включая письмо и аудирование. Повторения считаются по навыкам. Одинаковые слова учитываются один раз в общих итогах и отображаются в каждом своём наборе.", 13f, muted), 8)
         overview.forEach { pack -> combined.add(label("${pack.name}: введено ${pack.introduced}/${pack.total} · изучено ${pack.learned} · пора повторить ${pack.due}", 15f), 10) }
         Skill.entries.forEach { skill ->
-            val states = overview.flatMap { it.skills[skill].orEmpty() }
+            val states = total.skills[skill].orEmpty()
             combined.add(label("${skill.title}: закреплено ${states.count { it.mastered }}/${states.size} · трудных ${states.count { it.errors > 0 && !it.mastered }} · ошибок ${states.sumOf { it.errors }}/${states.sumOf { it.attempts }}", 14f), 8)
         }
         content.add(combined, 16)
@@ -1522,15 +1533,16 @@ class MainActivity : AppCompatActivity() {
         content.add(summary, 20)
         content.add(label("Что сложнее запомнить", 22f, ink, true), 24)
         content.add(label("Сначала — незакреплённые задания. Чем чаще ошибки и короче серия верных ответов, тем выше задание в списке.", 13f, muted), 8)
+        val wordsById = store.words.associateBy { it.id }
         val pairs = store.engine.progress.entries.flatMap { (key, state) ->
-            val word = store.words.firstOrNull { key.substringBefore(':') == it.id }
+            val word = wordsById[key.substringBefore(':')]
             state.confusions.entries.filter { word != null && !word.acceptsForm(it.key) }.map { Triple(word!!, it.key, it.value) }
         }.sortedByDescending { it.third }
         if (pairs.isNotEmpty()) {
             content.add(label("Часто путаю", 22f, ink, true), 16)
             pairs.take(20).forEach { (word, wrong, count) -> content.add(label("${word.hanzi} ↔ $wrong · $count ошибок", 17f), 6) }
             content.add(button("Практиковать похожие знаки") {
-                val focus = store.engine.progress.filter { (key, p) -> p.confusions.isNotEmpty() && store.words.any { it.id == key.substringBefore(':') } }
+                val focus = store.engine.progress.filter { (key, p) -> p.confusions.isNotEmpty() && key.substringBefore(':') in wordsById }
                     .keys.mapNotNull { key -> Skill.entries.find { it.name == key.substringAfter(':') }?.let { Task(key.substringBefore(':'), it) } }
                 val partners = focus.flatMap { task ->
                     val wrong = store.engine.peek(task).confusions.keys
@@ -1561,7 +1573,7 @@ class MainActivity : AppCompatActivity() {
         if (problematic.isEmpty()) content.add(label("Заданий с ошибками пока нет.", 15f, muted), 12)
         if (problematic.size > 100) content.add(label("Показаны 100 самых сложных заданий.", 13f, muted), 10)
         val difficultCards = problematic.take(100).map { task ->
-            val w = store.words.first { it.id == task.wordId }; val p = store.engine.peek(task)
+            val w = wordsById.getValue(task.wordId); val p = store.engine.peek(task)
             val item = card()
             item.add(label("${w.hanzi}  ·  ${w.pinyin}", 24f, jade, true))
             item.add(label(task.skill.title, 16f, ink), 6)

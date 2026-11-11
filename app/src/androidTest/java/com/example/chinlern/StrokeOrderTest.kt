@@ -110,6 +110,7 @@ class StrokeOrderTest {
     @Test fun offlineRenderingAndIndividualStrokes() {
         launch("水").use {
             ready()
+            tap("show-guides")
             assertEquals("true", js("document.querySelectorAll('#target svg path').length > 0"))
             instrumentation.runOnMainSync {
                 val activity = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED).single()
@@ -123,6 +124,7 @@ class StrokeOrderTest {
                 tap("next")
                 awaitJs("document.getElementById('status').textContent === 'Черта $stroke из 4'")
             }
+            assertEquals("4", js("document.querySelectorAll('.guide-number').length"))
             assertEquals("false", js("document.getElementById('next').disabled"))
             assertEquals("\"К первой черте\"", js("document.getElementById('next').textContent"))
             tap("replay")
@@ -144,6 +146,62 @@ class StrokeOrderTest {
             awaitJs("document.getElementById('status').textContent === 'Черта 1 из 4'")
             Thread.sleep(500)
             assertEquals("\"Черта 1 из 4\"", js("document.getElementById('status').textContent"))
+        }
+    }
+
+    @Test fun numberedDirectionsFollowPlaybackAndSurviveRecreation() {
+        launch("水永").use { scenario ->
+            ready()
+            assertEquals("\"false\"", js("document.getElementById('show-guides').getAttribute('aria-pressed')"))
+            assertEquals("0", js("document.getElementById('guides').childElementCount"))
+            tap("show-guides")
+            assertEquals("\"1,2,3,4\"", js("Array.from(document.querySelectorAll('.guide-number text'), n => n.textContent).join(',')"))
+            assertEquals("4", js("document.querySelectorAll('.guide-arrow').length"))
+            tap("slow"); ready(); tap("play"); tap("play")
+            awaitJs("document.querySelectorAll('.guide-number').length === 1")
+            assertEquals("\"1\"", js("document.querySelector('.guide-number text').textContent"))
+            tap("show-guides")
+            assertEquals("0", js("document.getElementById('guides').childElementCount"))
+            assertEquals("\"▶ Продолжить\"", js("document.getElementById('play').textContent"))
+            tap("show-guides"); tap("next")
+            awaitJs("document.getElementById('status').textContent === 'Черта 2 из 4' && !document.getElementById('play').disabled")
+            assertEquals("\"2\"", js("document.querySelector('.guide-number text').textContent"))
+            tap("show-guides")
+            scenario.recreate(); ready()
+            assertEquals("\"false\"", js("document.getElementById('show-guides').getAttribute('aria-pressed')"))
+            js("document.querySelectorAll('.chip')[1].click()"); ready()
+            assertEquals("0", js("document.getElementById('guides').childElementCount"))
+            tap("show-guides")
+            assertEquals("5", js("document.querySelectorAll('.guide-arrow').length"))
+        }
+    }
+
+    @Test fun directionGuidesTrackMedianPathsAndResize() {
+        launch("永").use {
+            ready()
+            tap("show-guides")
+            // Compare every arrow with the bundled median, including the hook's
+            // final segment, after transforming into the actual drawing bounds.
+            js("window.guideData = null; fetch('data/6c38.json').then(r => r.json()).then(d => window.guideData = d)")
+            awaitJs("window.guideData !== null")
+            val aligned = """(() => {
+                const size=document.getElementById('stage').clientWidth;
+                const t=HanziWriter.getScalingTransform(size,size,18);
+                return guideData.medians.every((m,i) => {
+                    const arrow=document.querySelectorAll('.guide-arrow')[i];
+                    const matrix=arrow.transform.baseVal.consolidate().matrix;
+                    const end=m[m.length-1], prev=m[m.length-2];
+                    const angle=Math.atan2(-(end[1]-prev[1]),end[0]-prev[0]);
+                    return Math.abs(matrix.e-(t.x+end[0]*t.scale))<.01 &&
+                        Math.abs(matrix.f-(size-t.y-end[1]*t.scale))<.01 &&
+                        Math.abs(matrix.a-Math.cos(angle))<.01 && Math.abs(matrix.b-Math.sin(angle))<.01;
+                });
+            })()""".trimIndent()
+            assertEquals("true", js(aligned))
+            js("document.getElementById('stage').style.width='180px'")
+            awaitJs("document.getElementById('guides').viewBox.baseVal.width === document.getElementById('stage').clientWidth")
+            assertEquals("true", js(aligned))
+            assertEquals("true", js("Array.from(document.querySelectorAll('.guide-number circle')).every(c => c.cx.baseVal.value-c.r.baseVal.value>=0 && c.cy.baseVal.value-c.r.baseVal.value>=0 && c.cx.baseVal.value+c.r.baseVal.value<=180 && c.cy.baseVal.value+c.r.baseVal.value<=180)"))
         }
     }
 
@@ -263,12 +321,14 @@ class StrokeOrderTest {
             awaitJs("!document.getElementById('unavailable').hidden")
             assertEquals("3", js("document.querySelectorAll('.chip').length"))
             assertEquals("true", js("document.getElementById('play').disabled && document.getElementById('next').disabled"))
+            assertEquals("0", js("document.getElementById('guides').childElementCount"))
             js("document.querySelectorAll('.chip')[1].click()")
             ready()
             assertEquals("true", js("document.getElementById('unavailable').hidden"))
             js("document.querySelectorAll('.chip')[2].click()")
             awaitJs("!document.getElementById('unavailable').hidden")
             assertEquals("\"!\"", js("document.getElementById('target').textContent"))
+            assertEquals("0", js("document.getElementById('guides').childElementCount"))
         }
     }
 

@@ -18,7 +18,7 @@ class WordKnowledgeStoreTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
     @Before fun reset() { context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit() }
 
-    @Test fun mixedPacksPersistIndependentlyAndKnownWordsBypassNewWordLimit() {
+    @Test fun mixedPacksShareKnowledgeAndKnownWordsBypassNewWordLimit() {
         var store = StudyStore(context)
         val first = store.activePackId
         val word = store.words.first()
@@ -32,8 +32,8 @@ class WordKnowledgeStoreTest {
         store = StudyStore(context)
         val packs = store.libraryPacks().associateBy { it.id }
         assertTrue(word.id in packs.getValue(first).recognized)
-        assertFalse(word.id in packs.getValue(first).writable)
-        assertFalse(word.id in packs.getValue(second).recognized)
+        assertTrue(word.id in packs.getValue(first).writable)
+        assertTrue(word.id in packs.getValue(second).recognized)
         assertTrue(word.id in packs.getValue(second).writable)
         assertEquals(setOf(first, second), store.practicePackIds)
         assertEquals(second, store.activePackId)

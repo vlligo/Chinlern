@@ -10,6 +10,7 @@ data class Word(
     val alternatives: List<String> = emptyList(),
     val example: String = "", val examplePinyin: String = "", val exampleTranslation: String = ""
 ) {
+    internal val learningIdentity by lazy { SharedWords.buildIdentity(this) }
     val writtenForms: List<String> get() = (listOf(hanzi) + alternatives).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
     fun acceptsForm(value: String) = value.trim() in writtenForms
 }

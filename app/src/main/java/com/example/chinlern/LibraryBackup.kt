@@ -96,8 +96,16 @@ object LibraryBackup {
                 val hash = MessageDigest.getInstance("SHA-256").digest("$id\n$text".toByteArray(Charsets.UTF_8))
                     .joinToString("") { "%02x".format(it) }.take(32)
                 var copyId = "backup-$hash"; var suffix = 0
-                while ((copyId in result && result[copyId] != copyText) || copyId in incoming) { suffix++; copyId = "backup-$hash-$suffix" }
-                if (result[copyId] != copyText) { result[copyId] = copyText; conflicts++ }
+                // Shared learning can update this copy after import. That is still the same
+                // imported vocabulary, not a reason to create another copy on every retry.
+                fun sameContent(text: String): Boolean {
+                    val existingCopy = JSONObject(text)
+                    return existingCopy.getString("name") == copy.getString("name") &&
+                        existingCopy.optString("folder", "") == copy.optString("folder", "") &&
+                        same(JSONObject(existingCopy.getString("words")), JSONObject(copy.getString("words")))
+                }
+                while ((copyId in result && !sameContent(result.getValue(copyId))) || copyId in incoming) { suffix++; copyId = "backup-$hash-$suffix" }
+                if (copyId !in result) { result[copyId] = copyText; conflicts++ }
             }
         }
         require(SyncSnapshot.encode(result).toByteArray(Charsets.UTF_8).size <= MAX_BYTES) { "Объединённая библиотека превышает 32 МБ. Данные не изменены." }

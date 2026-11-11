@@ -29,7 +29,7 @@ class LibraryMultiSelectTest {
             onView(withText("Снять выбор")).perform(scrollToLibraryControl(), click())
             assertTrue(StudyStore(context).libraryPacks().all { it.selected.isEmpty() })
             onView(withText("Выбрать все")).perform(scrollToLibraryControl(), click())
-            assertEquals(17, StudyStore(context).studyWords.size)
+            assertEquals(16, StudyStore(context).studyWords.size)
             scenario.recreate()
             onView(libraryPracticePicker(2)).check(matches(isDisplayed()))
             onView(withHint("Найти слово, пиньинь или перевод")).perform(scrollToLibraryControl(), replaceText("Second"), closeSoftKeyboard())

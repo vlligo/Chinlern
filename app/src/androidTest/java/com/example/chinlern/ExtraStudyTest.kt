@@ -25,7 +25,53 @@ class ExtraStudyTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
     @Before fun reset() { context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit() }
 
-    @Test fun everyNewWordGetsTwoQuestionsAcrossReloads() {
+    @Test fun familiarExtrasUseNormalLearningPriorityEvenForAlreadyAnsweredTasks() {
+        var now = System.currentTimeMillis()
+        var store = StudyStore(context, clock = { now })
+        store.selectedStudyWords.forEach { store.introduce(it) }
+        val focus = store.extraStudyTasks(newWords = false)
+        focus.forEach { store.studyEngine.state(it).apply { attempts = 3; due = now + Fsrs.DAY } }
+        val learning = focus.first()
+        store.studyEngine.answer(learning, false, now - 60_000)
+        assertTrue(store.beginExtraStudy(newWords = false))
+        repeat(3) {
+            assertEquals(learning, store.studyEngine.next(store.tasks(), now = now))
+            store.nextQuestion()
+            assertEquals(learning, store.current)
+            store.recordAnswer(false)
+            now += 60_000
+            store = StudyStore(context, clock = { now })
+        }
+        assertEquals(3, store.sessionCount)
+    }
+
+    @Test fun mixedFamiliarExtrasWaitForNormalDueTimesAfterReopening() {
+        val now = System.currentTimeMillis()
+        var store = StudyStore(context, clock = { now })
+        val seed = store.words.toList()
+        val first = store.activePackId
+        store.selected.clear(); store.selected.addAll(seed.take(8).map { it.id })
+        store.importPack("More words", seed.drop(8))
+        store.choosePracticePacks(setOf(first, store.activePackId))
+        store.selectedStudyWords.forEach { store.introduce(it) }
+        val focus = store.extraStudyTasks(newWords = false, writing = true)
+        focus.forEach { store.studyEngine.state(it).apply { attempts = 1; due = now + Fsrs.DAY } }
+        val due = focus.last()
+        store.studyEngine.state(due).due = now
+        store.beginExtraStudy(newWords = false, writing = true)
+        store.nextQuestion()
+        assertEquals(due, store.current)
+        store.recordAnswer(true)
+        store = StudyStore(context, clock = { now })
+        assertTrue(store.sessionUsesSchedule)
+        assertNull(store.studyEngine.next(store.tasks(), now = now))
+        store.nextQuestion()
+        assertNull(store.current)
+        assertTrue(store.sessionFinished)
+        assertEquals(1, store.sessionCount)
+    }
+
+    @Test fun newExtrasRespectNormalSiblingSpacingAcrossReloads() {
         val now = System.currentTimeMillis()
         var store = StudyStore(context, clock = { now })
         store.dailyNewWords = 0
@@ -34,36 +80,51 @@ class ExtraStudyTest {
         val ids = store.tasks().map { it.wordId }.toSet()
         assertEquals(5, ids.size)
         assertEquals(selectedCount, store.selectedStudyWords.size)
-        val asked = mutableMapOf<String, Int>()
-        repeat(10) { index ->
+        val asked = mutableSetOf<String>()
+        repeat(5) {
             store.nextQuestion()
             val task = store.current!!
-            val word = store.studyWords.first { it.id == task.wordId }
-            if (store.needsPreview(word)) store.introduce(word)
-            asked[task.wordId] = (asked[task.wordId] ?: 0) + 1
-            store.recordAnswer(index % 2 == 0)
-            if (index == 4) assertEquals(ids, asked.keys)
-            if (index in setOf(2, 6)) store = StudyStore(context, clock = { now })
+            store.introduce(store.studyWords.first { it.id == task.wordId })
+            assertTrue(asked.add(task.wordId))
+            store.recordAnswer(true)
+            store = StudyStore(context, clock = { now })
         }
+        assertEquals(ids, asked)
+        assertNull(store.studyEngine.next(store.tasks(), now = now))
+        store.nextQuestion()
+        assertNull(store.current)
         assertTrue(store.sessionFinished)
-        assertEquals(ids.associateWith { 2 }, asked)
+        assertEquals(5, store.sessionCount)
         assertEquals(0, store.dailyNewWords)
     }
 
-    @Test fun refreshedExtraSessionKeepsBalancedCoverage() {
+    @Test fun refreshedExtraSessionKeepsNormalScheduling() {
         var now = System.currentTimeMillis()
         var store = StudyStore(context, clock = { now })
         store.beginExtraStudy(newWords = true)
         store.nextQuestion(); store.introduce(store.studyWords.first { it.id == store.current!!.wordId })
+        val failed = store.current!!
         store.recordAnswer(false)
         now += 4 * 60 * 60 * 1000L
         store = StudyStore(context, clock = { now })
-        val firstRound = mutableSetOf<String>()
-        repeat(5) {
-            store.nextQuestion()
-            assertTrue(firstRound.add(store.current!!.wordId))
-            store.recordAnswer(true)
-        }
+        assertTrue(store.sessionUsesSchedule)
+        assertEquals(failed, store.studyEngine.next(store.tasks(), now = now))
+        store.nextQuestion()
+        assertEquals(failed, store.current)
+    }
+
+    @Test fun olderBalancedSessionsResumeWithNormalScheduling() {
+        val now = System.currentTimeMillis()
+        var store = StudyStore(context, clock = { now })
+        store.beginExtraStudy(newWords = true)
+        store.session.remove("scheduled")
+        store.session.put("balanced", true)
+        store.tasks().forEach { store.studyEngine.state(it).due = now + Fsrs.DAY }
+        store.save()
+        store = StudyStore(context, clock = { now })
+        store.nextQuestion()
+        assertNull(store.current)
+        assertTrue(store.sessionFinished)
     }
 
     private fun scrollToPracticeControl() = object : ViewAction {
@@ -97,7 +158,7 @@ class ExtraStudyTest {
         val focus = store.extraStudyTasks(newWords = true)
         val ids = focus.map { it.wordId }.toSet()
         assertEquals(5, ids.size)
-        store.beginSession(focus = focus)
+        store.beginExtraStudy(newWords = true)
         store.nextQuestion()
         assertNotNull(store.current)
         val word = store.studyWords.first { it.id == store.current!!.wordId }
@@ -117,26 +178,21 @@ class ExtraStudyTest {
         assertEquals(5, next.size)
     }
 
-    @Test fun familiarPracticeWorksBeforeDueWithoutResettingMemory() {
-        val store = StudyStore(context)
+    @Test fun familiarExtrasDoNotForceEarlyReviewsOrResetMemory() {
+        val now = System.currentTimeMillis()
+        val store = StudyStore(context, clock = { now })
         store.dailyNewWords = 0
-        val word = store.studyWords.first()
-        store.introduce(word)
+        store.introduce(store.studyWords.first())
         val focus = store.extraStudyTasks(newWords = false)
-        val future = System.currentTimeMillis() + 86_400_000L
-        focus.forEach { task -> store.studyEngine.state(task).apply { attempts = 3; mastered = true; due = future } }
+        focus.forEach { store.studyEngine.state(it).apply { attempts = 3; mastered = true; due = now + Fsrs.DAY } }
         val before = focus.associateWith { store.studyEngine.peek(it).copy() }
-        assertNull(store.studyEngine.next(focus))
-        store.beginSession(focus = focus)
-        store.nextQuestion()
-        assertNotNull(store.current)
-        assertEquals(before, focus.associateWith { store.studyEngine.peek(it).copy() })
-        store.recordAnswer(true)
-        assertEquals(4, store.studyEngine.peek(store.current!!).attempts)
-        store.endSession()
-        store.beginSession(focus = store.extraStudyTasks(newWords = false))
-        store.nextQuestion()
-        assertNotNull(store.current)
+        repeat(2) {
+            assertTrue(store.beginExtraStudy(newWords = false))
+            store.nextQuestion()
+            assertNull(store.current)
+            assertTrue(store.sessionFinished)
+            assertEquals(before, focus.associateWith { store.studyEngine.peek(it).copy() })
+        }
     }
 
     @Test fun extraWordsRespectSelectionWritingAndExhaustion() {
@@ -152,7 +208,7 @@ class ExtraStudyTest {
         assertTrue(store.extraStudyTasks(newWords = false).isEmpty())
     }
 
-    @Test fun mixedPackIntroductionsStayWithTheirOriginalWordsAfterReload() {
+    @Test fun mixedPackIntroductionsAreSharedAfterReload() {
         var store = StudyStore(context)
         store.dailyNewWords = 0
         val firstPack = store.activePackId
@@ -161,20 +217,19 @@ class ExtraStudyTest {
         store.importPack("Extra study", listOf(firstWord))
         store.choosePracticePacks(setOf(firstPack, store.activePackId))
         val focus = store.extraStudyTasks(newWords = true, writing = true)
-        assertEquals(2, focus.size)
-        store.beginSession(focus = focus)
+        assertEquals(1, focus.size)
+        store.beginExtraStudy(newWords = true, writing = true)
         store.nextQuestion()
         val word = store.studyWords.first { it.id == store.current!!.wordId }
         store.introduce(word); store.recordAnswer(true)
         store = StudyStore(context)
-        assertEquals(1, store.extraStudyTasks(newWords = true, writing = true).size)
+        assertTrue(store.extraStudyTasks(newWords = true, writing = true).isEmpty())
         assertEquals(1, store.extraStudyTasks(newWords = false, writing = true).size)
         assertEquals(1, store.studyEngine.peek(store.current!!).attempts)
         store.endSession()
-        store.beginSession(focus = store.extraStudyTasks(newWords = true, writing = true))
-        store.nextQuestion()
-        assertNotEquals(word.id, store.current!!.wordId)
-        assertTrue(store.needsPreview(store.studyWords.first { it.id == store.current!!.wordId }))
+        assertFalse(store.beginExtraStudy(newWords = true, writing = true))
+        store.choosePracticePacks(setOf(firstPack))
+        assertFalse(store.needsPreview(store.studyWords.single()))
     }
 
     @Test fun learnMoreFromDashboardPreviewAndResults() {
@@ -205,7 +260,7 @@ class ExtraStudyTest {
         }
     }
 
-    @Test fun noDueReviewsStillAllowsFamiliarPractice() {
+    @Test fun noDueReviewsFinishExtrasAndContinueWithNormalScheduling() {
         val store = StudyStore(context)
         store.dailyNewWords = 0; store.onboardingDone = true
         store.studyWords.forEach { store.introduce(it) }
@@ -215,7 +270,11 @@ class ExtraStudyTest {
         ActivityScenario.launch(MainActivity::class.java).use {
             onView(withText("Сейчас повторений нет")).check(matches(isDisplayed()))
             onView(withText("Практиковать знакомые слова")).perform(scrollToPracticeControl(), click())
-            onView(withText("Завершить занятие")).check(matches(isDisplayed()))
+            onView(withText("Занятие завершено")).check(matches(isDisplayed()))
+            onView(withText("Ответов: 0")).check(matches(isDisplayed()))
+            onView(withText("Ещё 10 вопросов")).perform(scrollToPracticeControl(), click())
+            onView(withText("Занятие завершено")).check(matches(isDisplayed()))
+            assertTrue(StudyStore(context).sessionUsesSchedule)
         }
     }
 }

@@ -22,9 +22,14 @@
     <div id="stage">
       <svg id="grid" viewBox="0 0 320 320" aria-hidden="true"><path d="M160 0V320 M0 160H320 M0 0L320 320 M320 0L0 320"/></svg>
       <div id="target" role="img" aria-label=""></div>
+      <svg id="guides" aria-hidden="true"></svg>
       <p id="unavailable" hidden>Для этого знака пока нет данных о порядке черт.</p>
     </div>
     <p id="status" role="status" aria-live="polite">Загрузка…</p>
+    <div class="guide-controls">
+      <button id="show-guides" aria-pressed="false" disabled>Номера и стрелки</button>
+      <p id="guide-hint" hidden>Номер — начало черты, стрелка — направление письма.</p>
+    </div>
     <p id="swipe-hint" hidden>← Смахните влево или вправо, чтобы сменить знак →</p>
     <div class="controls">
       <button id="play" class="primary" disabled>▶ Смотреть</button>

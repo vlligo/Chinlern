@@ -57,6 +57,19 @@ class LibraryBackupTest {
         assertEquals(local, LibraryBackup.merge(local, mapOf("first" to pack())).packs)
     }
 
+    @Test fun updatedSharedProgressDoesNotCreateAnotherBackupCopyOnRetry() {
+        val incoming = mapOf("first" to pack(2))
+        val initial = LibraryBackup.merge(mapOf("first" to pack(4)), incoming)
+        val copyId = initial.packs.keys.first { it != "first" }
+        val learned = initial.packs.toMutableMap()
+        val copy = JSONObject(learned.getValue(copyId))
+        copy.put("progress", JSONObject(pack(5)).getJSONObject("progress"))
+        learned[copyId] = SyncSnapshot.pack(copy)
+        val repeated = LibraryBackup.merge(learned, incoming)
+        assertEquals(learned, repeated.packs)
+        assertEquals(0, repeated.conflicts)
+    }
+
     @Test fun conflictsCannotOverwriteAnotherIncomingPack() {
         val incoming = mapOf("first" to pack(2))
         val initial = LibraryBackup.merge(mapOf("first" to pack(4)), incoming)

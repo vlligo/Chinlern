@@ -7,8 +7,11 @@ import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.ListView
 import android.widget.ScrollView
+import android.widget.TextView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
 import com.google.android.material.bottomnavigation.BottomNavigationView
@@ -165,6 +168,81 @@ class SectionSwipeTest {
             scenario.onActivity { drag(host(it), host(it).width * 0.65f) }
             awaitSettled(scenario)
             scenario.onActivity { assertEquals(position, views(activePage(it)).filterIsInstance<ScrollView>().single().scrollY) }
+        }
+    }
+
+    @Test fun progressRecyclesDifficultCardsAndRetainsItsScrollPosition() {
+        StudyStore(instrumentation.targetContext).apply {
+            val seed = words.first()
+            words = (0 until 110).map { index ->
+                seed.copy(id = "word${1000 + index}", hanzi = "水$index", meanings = listOf("перевод $index"))
+            }.toMutableList()
+            selected.clear()
+            selected.addAll(words.map { it.id })
+            words.forEach { engine.progress[Task(it.id, Skill.WRITING).key] = Progress(attempts = 1, errors = 1) }
+            save()
+        }
+        fun list(activity: MainActivity) = views(activePage(activity)).filterIsInstance<ListView>().single()
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { navigate(it, "stats") }
+            awaitSettled(scenario)
+            scenario.onActivity { activity ->
+                val visibleCards = views(activePage(activity)).filterIsInstance<TextView>()
+                    .count { it.text.startsWith("На повторении · Ошибок") }
+                android.util.Log.i("OverviewPerformance", "Difficult-card views attached on open: $visibleCards")
+                assertTrue("Offscreen difficult cards should not be attached", visibleCards < 20)
+                list(activity).apply {
+                    assertTrue(footerViewsCount > 0)
+                    requestFocusFromTouch()
+                    setSelectionFromTop(count - footerViewsCount - 1, 0)
+                }
+            }
+            awaitSettled(scenario)
+            var firstRow = 0
+            scenario.onActivity {
+                val list = list(it)
+                assertTrue(views(list).filterIsInstance<TextView>().any { label -> label.text.startsWith("水99  ·  ") })
+                assertTrue(views(list).filterIsInstance<TextView>().any { label -> label.text.startsWith("Исключено неоднозначных направлений") })
+                firstRow = list.firstVisiblePosition
+                assertTrue(firstRow > 0)
+                navigate(it, "settings")
+            }
+            awaitSettled(scenario)
+            scenario.onActivity { navigate(it, "stats") }
+            awaitSettled(scenario)
+            scenario.onActivity { assertEquals(firstRow, list(it).firstVisiblePosition) }
+        }
+    }
+
+    @Test fun libraryEditRefreshesProgressAfterAnImmediateSwipe() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            lateinit var settings: View
+            scenario.onActivity { navigate(it, "settings") }
+            awaitSettled(scenario)
+            scenario.onActivity {
+                settings = activePage(it)
+                navigate(it, "words")
+            }
+            awaitSettled(scenario)
+            scenario.onActivity { activity ->
+                val list = views(activePage(activity)).filterIsInstance<ListView>().single()
+                list.requestFocusFromTouch()
+                list.setSelectionFromTop(1, 0)
+            }
+            awaitSettled(scenario)
+            scenario.onActivity { activity ->
+                views(activePage(activity)).filterIsInstance<CheckBox>()
+                    .first { it.contentDescription == "Умею писать: 水 · Мои слова" }.performClick()
+                drag(host(activity), -host(activity).width * 0.65f)
+            }
+            awaitSettled(scenario)
+            scenario.onActivity { activity ->
+                assertRoute(activity, "stats")
+                assertTrue(views(activePage(activity)).filterIsInstance<TextView>().any { it.text.startsWith("Написание: 1 /") })
+                navigate(activity, "settings")
+            }
+            awaitSettled(scenario)
+            scenario.onActivity { assertSame(settings, activePage(it)) }
         }
     }
 

@@ -32,6 +32,19 @@ class PackSyncMergeTest {
         (0 until a.length()).map { a.getJSONObject(it) }
     }
 
+    @Test fun dailyActivityMergesAcrossDatesWithoutRetryDuplication() {
+        val base = pack(); val local = copy(base); val remote = copy(base)
+        local.getJSONObject("progress").put("a:WRITING", state(2, 0, true).put("activity",
+            JSONObject().put("2026-11-13", JSONArray(listOf(1, 1))).put("2026-11-14", JSONArray(listOf(1, 1)))))
+        remote.getJSONObject("progress").put("a:WRITING", state(2, 1, false).put("activity",
+            JSONObject().put("2026-11-12", JSONArray(listOf(1, 0))).put("2026-11-14", JSONArray(listOf(1, 1)))))
+        val merged = merge(base, local, remote)
+        val activity = ProgressCodec.read(merged.getJSONObject("progress").getJSONObject("a:WRITING")).activity
+        assertEquals(3, activity.size)
+        assertEquals(1, activity.getValue("2026-11-14").answers)
+        assertEquals(SyncSnapshot.pack(merged), SyncSnapshot.pack(merge(base, local, merged)))
+    }
+
     @Test fun organizationMergesWithIndependentProgressAndSurvivesBackup() {
         val base = pack()
         val local = copy(base).put("folder", "Уроки").put("hidden", true)

@@ -2,4 +2,6 @@
 <resources>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <color name="chinlern_paper">#F9F6EE</color>
+    <color name="chinlern_launch_red">#811924</color>
 </resources>

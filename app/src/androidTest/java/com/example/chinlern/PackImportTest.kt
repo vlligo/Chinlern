@@ -23,6 +23,27 @@ class PackImportTest {
         try { PackImport.parse(json.replace("shuǐ", "shui2")); fail("Invalid tones") }
         catch (e: IllegalArgumentException) { assertTrue(e.message!!.contains("Карточка 1")) }
     }
+    @Test fun errorsIdentifyTheCardAndFieldToFix() {
+        val invalid = listOf(
+            json.replace("\"meanings\":[\"вода\"]", "\"meanings\":42") to "meanings",
+            json.replace("\"pinyin\":\"shuǐ\",", "") to "pinyin",
+            json.replace("\"alternatives\":[\"氵\"]", "\"alternatives\":[42]") to "alternatives"
+        )
+        invalid.forEach { (input, field) ->
+            try { PackImport.parse(input); fail("Invalid field accepted") }
+            catch (e: IllegalArgumentException) {
+                assertTrue(e.message!!, e.message!!.contains("Карточка 1 «水»"))
+                assertTrue(e.message!!, e.message!!.contains(field))
+            }
+        }
+        val missingHanzi = """{"pinyin":"huo3","meanings":["огонь"]}"""
+        val first = org.json.JSONObject(json).getJSONArray("words").getJSONObject(0)
+        try { PackImport.parse("[$first,$missingHanzi]"); fail("Missing hanzi accepted") }
+        catch (e: IllegalArgumentException) { assertTrue(e.message!!, e.message!!.contains("Карточка 2")) }
+        try { PackImport.parse("[$first,$first]"); fail("Duplicate accepted") }
+        catch (e: IllegalArgumentException) { assertTrue(e.message!!, e.message!!.contains("повторяет карточку 1")) }
+    }
+
     @Test fun promptExampleIsImportable() {
         val example = PackImport.prompt.lineSequence().first { it.startsWith("{\"name\"") }
         assertEquals("水", PackImport.parse(example).words.single().hanzi)

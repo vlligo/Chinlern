@@ -6,6 +6,22 @@ import kotlin.random.Random
 
 class LearningEngineTest {
     private val water = Word("water", "水", "shuǐ", "shui3", listOf("вода", "влага"), listOf("永", "冰", "泳", "水", "氵"), alternatives = listOf("氵"))
+    @Test fun earlyPracticeCoversWordsBeforeRepeatingAcrossSkills() {
+        val engine = LearningEngine()
+        val tasks = (1..12).flatMap { word -> listOf(Skill.CHARACTER_MEANING, Skill.CHARACTER_PINYIN, Skill.CHARACTER_TONE).map { Task("word$word", it) } }
+        val now = 1_800_000_000_000L
+        tasks.forEach { engine.state(it).apply { attempts = 1; due = now + Fsrs.DAY } }
+        val seen = mutableSetOf<String>()
+        repeat(12) {
+            val task = engine.nextEarlyReview(tasks)!!
+            assertTrue("Repeated ${task.wordId} before covering all words", seen.add(task.wordId))
+            engine.answer(task, true, now)
+        }
+        assertEquals(12, seen.size)
+        assertNull(engine.nextEarlyReview(emptyList()))
+        assertEquals(tasks.first(), engine.nextEarlyReview(listOf(tasks.first())))
+    }
+
     @Test fun cachedTasksTrackInPlaceVocabularyChangesAndModeSwitches() {
         val engine = LearningEngine()
         val words = mutableListOf(water)

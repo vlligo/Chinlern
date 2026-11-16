@@ -3,10 +3,18 @@
         <item name="colorPrimary">#9F2936</item>
         <item name="colorOnPrimary">#FFFFFF</item>
         <item name="colorSecondary">#244B44</item>
-        <item name="colorSurface">#F9F6EE</item>
+        <item name="colorSurface">@color/chinlern_paper</item>
         <item name="android:fontFamily">sans</item>
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowBackground">#F9F6EE</item>
+        <item name="android:windowBackground">@color/chinlern_paper</item>
     </style>
     <style name="Theme.Chinlern" parent="Base.Theme.Chinlern" />
+    <style name="Theme.Chinlern.LaunchPalette" parent="Theme.Chinlern">
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">@color/chinlern_launch_red</item>
+        <item name="android:navigationBarColor">@color/chinlern_launch_red</item>
+    </style>
+    <style name="Theme.Chinlern.Starting" parent="Theme.Chinlern.LaunchPalette">
+        <item name="android:windowBackground">@drawable/launch_background</item>
+    </style>
 </resources>

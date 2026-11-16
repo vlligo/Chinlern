@@ -32,6 +32,7 @@ object SharedWords {
         return chosen.copy(
             attempts = meaningful.maxOf { it.attempts }, errors = meaningful.maxOf { it.errors },
             nextAt = meaningful.maxOf { it.nextAt }, confusions = confusions,
+            activity = StudyActivity.merge(meaningful.map { it.activity }),
             memory = chosen.memory?.let { memory -> memory.copy(history = history.filter { it.at <= memory.lastReview }) }
         )
     }

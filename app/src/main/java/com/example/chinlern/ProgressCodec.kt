@@ -9,11 +9,23 @@ object ProgressCodec {
         j.optInt("attempts"), j.optInt("errors"), j.optInt("streak"), j.optBoolean("mastered"),
         j.optInt("nextAt"), j.optLong("due"), j.optInt("interval"),
         j.optJSONObject("confusions")?.let { c -> c.keys().asSequence().associateWith { c.getInt(it) } } ?: emptyMap(),
-        j.optJSONObject("srs")?.let(::readMemory)
+        j.optJSONObject("srs")?.let(::readMemory),
+        j.optJSONObject("activity")?.let { days -> days.keys().asSequence().associateWith { key ->
+            val day = days.getJSONArray(key)
+            require(key.matches(Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}")) && day.length() == 2)
+            val format = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).apply { isLenient = false }
+            require(runCatching { format.format(format.parse(key)!!) == key }.getOrDefault(false)) { "Некорректная дата занятия." }
+            val answers = day.getInt(0); val correct = day.getInt(1)
+            require(answers > 0 && correct in 0..answers)
+            StudyActivity.Day(answers, correct)
+        } } ?: StudyActivity.fromHistory(j.optJSONObject("srs")?.let(::readMemory)?.history.orEmpty())
     )
     fun write(p: Progress): JSONObject = JSONObject().put("attempts", p.attempts).put("errors", p.errors)
         .put("streak", p.streak).put("mastered", p.mastered).put("nextAt", p.nextAt).put("due", p.due)
-        .put("interval", p.interval).put("confusions", JSONObject(p.confusions)).apply {
+        .put("interval", p.interval).put("confusions", JSONObject(p.confusions))
+        .put("activity", JSONObject().apply { p.activity.forEach { (date, day) ->
+            put(date, JSONArray(listOf(day.answers, day.correct)))
+        } }).apply {
             p.memory?.let { put("srs", writeMemory(it)) }
         }
     fun writeMemory(m: Fsrs.Memory): JSONObject = JSONObject().put("version", 6)

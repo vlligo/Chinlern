@@ -283,7 +283,7 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
     fun needsPreview(word: Word) = !introductions.has(introductionKey(word)) &&
         Skill.entries.none { studyEngine.progress[Task(word.id, it).key]?.let { p -> p.attempts > 0 || p.mastered } == true }
     fun introduce(word: Word) { touchPractice(); introductions.put(introductionKey(word), today()); savePractice() }
-    /** Extra practice expands eligibility while retaining normal scheduling and the daily setting. */
+    /** Extra study respects selection and leaves the daily introduction setting unchanged. */
     fun extraStudyTasks(newWords: Boolean, writing: Boolean = this.writing): List<Task> {
         // Generate against the full selection to preserve ambiguity and audio exclusions.
         // A finished focused session exposes only its own words through studyWords.
@@ -299,7 +299,7 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         val focus = extraStudyTasks(newWords, writing)
         if (focus.isEmpty()) return false
         this.writing = writing
-        beginSession(focus = focus, scheduled = true)
+        beginSession(focus = focus, scheduled = newWords)
         return true
     }
     private fun eligibleWords(words: List<Word>): List<Word> {
@@ -641,10 +641,10 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         val reviewed = session.optJSONArray("reviewed")?.strings()?.toSet().orEmpty()
         val manualDrill = explicitFocus && !sessionUsesSchedule
         val candidates = if (manualDrill) available.filter { it.key !in reviewed } else available
-        // Extras use the same due times, learning priority and sibling spacing as normal practice.
+        // Scheduled study retains normal due times, learning priority and sibling spacing.
         // Only explicitly chosen drills can force an early review once per skill.
         current = studyEngine.next(candidates, now = clock())
-            ?: if (manualDrill) candidates.firstOrNull { it.wordId != studyEngine.previous?.wordId } ?: candidates.firstOrNull() else null
+            ?: if (manualDrill) studyEngine.nextEarlyReview(candidates) else null
         if (current == null && shortSession) session.put("finished", true)
         current?.let { task ->
             val word = studyWords.first { it.id == task.wordId }
@@ -919,6 +919,15 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
     data class PackOverview(val name: String, val total: Int, val introduced: Int, val learned: Int,
         val mastered: Int, val due: Int, val skills: Map<Skill, List<Progress>>)
 
+    fun activitySummary(): StudyActivity.Summary {
+        val skills = Skill.entries.associateWith { skill ->
+            wordGroups().values.mapNotNull { origins ->
+                SharedWords.merge(origins.mapNotNull { progressAt(it, skill) })
+            }
+        }
+        return StudyActivity.summarize(skills, clock())
+    }
+
     fun overview(includeTotal: Boolean = false): List<PackOverview> {
         // The pager prepares Progress even when it is offscreen. Reading it must not
         // serialize review histories, write preferences, or trigger cloud sync.
@@ -1019,22 +1028,50 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         private fun writeProgress(p: Progress) = ProgressCodec.write(p)
         private fun JSONArray.strings() = (0 until length()).map { getString(it) }
         fun decodeWords(text: String): List<Word> {
-            val arr = if (text.trim().startsWith("[")) JSONArray(text) else JSONObject(text).getJSONArray("words")
+            val arr = if (text.trim().startsWith("[")) JSONArray(text) else {
+                val root = JSONObject(text)
+                require(root.opt("words") is JSONArray) { "Поле words должно быть массивом карточек: \"words\": [{...}]." }
+                root.getJSONArray("words")
+            }
             require(arr.length() in 1..2000) { "В файле должно быть от 1 до 2000 слов." }
             val result = (0 until arr.length()).map { index ->
                 try {
-                val j = arr.getJSONObject(index)
+                val j = arr.optJSONObject(index)
+                    ?: throw IllegalArgumentException("Ожидается объект с полями hanzi, pinyin и meanings.")
+                listOf("hanzi", "pinyin").forEach { field ->
+                    require(j.opt(field) is String && j.getString(field).isNotBlank()) {
+                        "Поле $field должно быть непустой строкой в двойных кавычках."
+                    }
+                }
+                listOf("id", "numbered", "hint", "example", "examplePinyin", "exampleTranslation").forEach { field ->
+                    require(!j.has(field) || j.opt(field) is String) { "Поле $field должно быть строкой в двойных кавычках." }
+                }
+                listOf("meanings", "alternatives", "distractors").forEach { field ->
+                    if (field == "meanings" || j.has(field)) {
+                        val values = j.optJSONArray(field)
+                        require(values != null) { "Поле $field должно быть массивом строк, например: [\"вода\"]." }
+                        require((0 until values.length()).all { values.opt(it) is String }) { "Каждый элемент поля $field должен быть строкой в двойных кавычках." }
+                    }
+                }
                 val word = Word(j.optString("id", j.getString("hanzi")), j.getString("hanzi").trim(),
                     j.getString("pinyin").trim(), j.optString("numbered", j.getString("pinyin")).trim(), j.getJSONArray("meanings").strings().map { it.trim() }.filter { it.isNotEmpty() },
-                    (j.optJSONArray("distractors")?.strings() ?: ((0 until arr.length()).map { arr.getJSONObject(it).getString("hanzi") } + listOf("水", "火", "木", "人", "口", "日", "月", "山"))).map { it.trim() }.filter { it.isNotEmpty() && it != j.getString("hanzi") && it !in (j.optJSONArray("alternatives")?.strings() ?: emptyList()) }.distinct().take(5), j.optString("hint"),
+                    (j.optJSONArray("distractors")?.strings() ?: ((0 until arr.length()).map { arr.optJSONObject(it)?.optString("hanzi").orEmpty() } + listOf("水", "火", "木", "人", "口", "日", "月", "山"))).map { it.trim() }.filter { it.isNotEmpty() && it != j.getString("hanzi") && it !in (j.optJSONArray("alternatives")?.strings() ?: emptyList()) }.distinct().take(5), j.optString("hint"),
                     j.optJSONArray("alternatives")?.strings()?.map { it.trim() }?.filter { it.isNotEmpty() }?.distinct() ?: emptyList(),
                     j.optString("example").trim(), j.optString("examplePinyin").trim(), j.optString("exampleTranslation").trim())
                 validate(word)
                 word
-                } catch (e: Exception) { throw IllegalArgumentException("Карточка ${index + 1}: ${e.message ?: "проверьте поля"}", e) }
+                } catch (e: Exception) {
+                    val hanzi = arr.optJSONObject(index)?.optString("hanzi").orEmpty().take(30)
+                    throw IllegalArgumentException("Карточка ${index + 1}${if (hanzi.isBlank()) "" else " «$hanzi»"}: ${e.message ?: "проверьте поля hanzi, pinyin и meanings"}", e)
+                }
             }
-            require(result.map { it.id }.distinct().size == result.size) { "У слов должны быть уникальные id." }
-            require(result.map { it.hanzi }.distinct().size == result.size) { "В файле есть повторяющиеся иероглифы." }
+            listOf("id" to result.map { it.id }, "hanzi" to result.map { it.hanzi }).forEach { (field, values) ->
+                val seen = mutableMapOf<String, Int>()
+                values.forEachIndexed { index, value ->
+                    val previous = seen.put(value, index)
+                    require(previous == null) { "Карточка ${index + 1} «${result[index].hanzi}»: поле $field «$value» повторяет карточку ${previous!! + 1}. Удалите дубликат или исправьте $field." }
+                }
+            }
             return result
         }
         fun validate(w: Word) {

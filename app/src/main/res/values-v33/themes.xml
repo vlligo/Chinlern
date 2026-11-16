@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.Chinlern.Starting" parent="Base.Theme.Chinlern.Starting">
+        <item name="android:windowSplashScreenBehavior">icon_preferred</item>
+    </style>
+</resources>

@@ -57,7 +57,11 @@ class LibraryPerformanceTest {
     }
     private fun descendants(view: View): List<View> = listOf(view) +
         if (view is ViewGroup) (0 until view.childCount).flatMap { descendants(view.getChildAt(it)) } else emptyList()
-    private fun list(activity: MainActivity) = descendants(activity.window.decorView).filterIsInstance<ListView>().single()
+    private fun list(activity: MainActivity): ListView {
+        val page = MainActivity::class.java.getDeclaredField("pageFrame")
+            .apply { isAccessible = true }.get(activity) as View
+        return descendants(page).filterIsInstance<ListView>().single()
+    }
     private fun jumpToRow(list: ListView, row: Int) {
         // ListView keeps keyboard selection separate from touch-mode scroll position.
         list.requestFocusFromTouch()

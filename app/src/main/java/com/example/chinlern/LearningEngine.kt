@@ -40,7 +40,8 @@ data class Progress(
     var mastered: Boolean = false, var nextAt: Int = 0, var due: Long = 0,
     var interval: Int = 0,
     var confusions: Map<String, Int> = emptyMap(),
-    var memory: Fsrs.Memory? = null
+    var memory: Fsrs.Memory? = null,
+    var activity: Map<String, StudyActivity.Day> = emptyMap()
 )
 
 object Answers {
@@ -207,6 +208,27 @@ class LearningEngine(val progress: MutableMap<String, Progress> = mutableMapOf()
         val otherSkills = otherWords.filter { it.skill != previous?.skill }.ifEmpty { otherWords }
         return otherSkills.random(random)
     }
+    /** Optional early reviews should not repeatedly pick the first two words in pack order. */
+    fun nextEarlyReview(tasks: List<Task>): Task? {
+        if (tasks.isEmpty()) return null
+        val ids = tasks.map { it.wordId }.toSet()
+        val modes = tasks.map { it.skill == Skill.WRITING }.toSet()
+        val lastReview = mutableMapOf<String, Long>()
+        val attempts = mutableMapOf<String, Long>()
+        progress.forEach { (key, state) ->
+            val wordId = key.substringBefore(':')
+            if (wordId in ids && (key.substringAfter(':') == Skill.WRITING.name) in modes) {
+                lastReview[wordId] = maxOf(lastReview[wordId] ?: 0L, state.memory?.history?.lastOrNull()?.at ?: 0L)
+                attempts[wordId] = (attempts[wordId] ?: 0L) + state.attempts
+            }
+        }
+        val candidates = tasks.filter { it.wordId != previous?.wordId }.ifEmpty { tasks }
+        return candidates.minWithOrNull(compareBy<Task> { lastReview[it.wordId] ?: 0L }
+            .thenBy { attempts[it.wordId] ?: 0L }.thenBy { it.wordId }
+            .thenBy { progress[it.key]?.memory?.history?.lastOrNull()?.at ?: 0L }
+            .thenBy { progress[it.key]?.attempts ?: 0 }.thenBy { it.key })
+    }
+
     @Suppress("UNUSED_PARAMETER") // Kept for compatibility with older callers; spacing now uses real time.
     fun answer(task: Task, correct: Boolean, now: Long = System.currentTimeMillis(), delay: Int = 0,
                retention: Double = 0.9) = answer(task, if (correct) Fsrs.Rating.GOOD else Fsrs.Rating.AGAIN, now, retention)
@@ -214,6 +236,10 @@ class LearningEngine(val progress: MutableMap<String, Progress> = mutableMapOf()
     fun answer(task: Task, rating: Fsrs.Rating, now: Long = System.currentTimeMillis(), retention: Double = 0.9) {
         val p = state(task)
         val scheduled = Fsrs.schedule(Fsrs.migrate(p, now), rating, now, retention)
+        val day = StudyActivity.date(now)
+        val activity = p.activity[day] ?: StudyActivity.Day()
+        p.activity = p.activity + (day to StudyActivity.Day(activity.answers + 1,
+            activity.correct + if (rating == Fsrs.Rating.AGAIN) 0 else 1))
         p.attempts++
         step++
         previous = task

@@ -19,6 +19,8 @@ object PackImport {
             require(value is JSONObject || value is org.json.JSONArray) { "Нужен объект или массив JSON." }
             require(tokenizer.nextClean() == '\u0000') { "После JSON есть лишний текст. Скопируйте только набор." }
             StudyStore.decodeWords(text)
+        } catch (e: org.json.JSONException) {
+            throw IllegalArgumentException("Не удалось разобрать JSON. Проверьте двойные кавычки, запятые и закрывающие скобки.\nПодробности: ${e.message}", e)
         } catch (e: Exception) {
             throw IllegalArgumentException("Проверьте набор: ${e.message ?: "неверный JSON"}", e)
         }

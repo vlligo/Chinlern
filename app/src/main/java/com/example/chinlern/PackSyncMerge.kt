@@ -60,6 +60,10 @@ internal object PackSyncMerge {
         // Snapshots have no unique answer IDs. Maxima are retry-safe; adding counters would
         // count shared/offline answers again after a retry or an edit during upload.
         for (key in listOf("attempts", "errors")) merged.put(key, maxOf(local.optInt(key), remote.optInt(key)))
+        val activity = StudyActivity.merge(listOf(ProgressCodec.read(local).activity, ProgressCodec.read(remote).activity))
+        merged.put("activity", JSONObject().apply { activity.forEach { (date, day) ->
+            put(date, JSONArray(listOf(day.answers, day.correct)))
+        } })
         val mastered = local.optBoolean("mastered") && remote.optBoolean("mastered")
         merged.put("mastered", mastered)
         merged.put("streak", if (mastered) minOf(local.optInt("streak"), remote.optInt("streak")) else 0)

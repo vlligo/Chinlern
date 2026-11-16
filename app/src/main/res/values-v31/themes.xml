@@ -1,0 +1,8 @@
+<resources>
+    <style name="Base.Theme.Chinlern.Starting" parent="Theme.Chinlern.LaunchPalette">
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowSplashScreenBackground">@color/chinlern_launch_red</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/launch_mark</item>
+    </style>
+    <style name="Theme.Chinlern.Starting" parent="Base.Theme.Chinlern.Starting" />
+</resources>

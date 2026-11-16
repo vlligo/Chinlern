@@ -23,6 +23,20 @@ class PackFilesTest {
         assertEquals(1, result.errors.size)
         assertTrue(result.errors.single().contains("broken.json"))
     }
+    @Test fun archiveErrorsIncludeFilenameCardAndCorrection() {
+        val broken = json.replace("\"meanings\":[\"вода\"]", "\"meanings\":42")
+        val result = PackFiles.read("packs.zip", zip("good.json" to json, "broken.json" to broken).inputStream())
+        assertEquals(1, result.items.size)
+        val error = result.errors.single()
+        assertTrue(error, error.contains("packs.zip / broken.json"))
+        assertTrue(error, error.contains("Карточка 1 «水»"))
+        assertTrue(error, error.contains("meanings должно быть массивом строк"))
+    }
+    @Test fun syntaxErrorsExplainHowToFixJson() {
+        val result = PackFiles.read("broken.json", "{\"words\":[".byteInputStream())
+        assertTrue(result.items.isEmpty())
+        assertTrue(result.errors.single(), result.errors.single().contains("Проверьте двойные кавычки"))
+    }
     @Test fun zipDetectionHandlesShortProviderReads() {
         val bytes = zip("pack.json" to json)
         val provider = object : java.io.FilterInputStream(bytes.inputStream()) {

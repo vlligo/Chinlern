@@ -63,8 +63,10 @@ class MainActivity : AppCompatActivity() {
         val content: LinearLayout, val list: ListView?, val syncLabel: TextView?
     )
     private var bottomNavigation: BottomNavigationView? = null
-    private var libraryList: ListView? = null
-    private var libraryScrollPosition = 0 to 0
+    private var sectionList: ListView? = null
+    private val listScrollPositions = mutableMapOf<String, Pair<Int, Int>>()
+    private var sectionScrollState = ViewPager.SCROLL_STATE_IDLE
+    private var sectionRefreshPending = false
     private val railItems = mutableMapOf<String, MaterialButton>()
     private val pageScrollPositions = mutableMapOf<String, Int>()
     private val navigationRoutes = listOf("learn", "words", "stats", "settings")
@@ -130,7 +132,7 @@ class MainActivity : AppCompatActivity() {
                 isChecked = true; box.add(this, 8)
             }
         }
-        if (errors.isNotEmpty()) box.add(label("Не удалось прочитать:\n${errors.joinToString("\n\n")}", 14f, red), 12)
+        if (errors.isNotEmpty()) box.add(label("Не удалось прочитать:\n${errors.joinToString("\n\n")}", 14f, red).apply { setTextIsSelectable(true) }, 12)
         val dialog = MaterialAlertDialogBuilder(this).setTitle("Проверьте наборы")
             .setView(ScrollView(this).apply { addView(box) }).setNegativeButton("Отмена", null)
             .setPositiveButton("Создать выбранные", null).create()
@@ -207,6 +209,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { message("Импорт не выполнен", e.message ?: "Проверьте резервную копию") }
     }
     override fun onCreate(savedInstanceState: Bundle?) {
+        setTheme(R.style.Theme_Chinlern)
         super.onCreate(savedInstanceState)
         volumeControlStream = android.media.AudioManager.STREAM_MUSIC
         enableEdgeToEdge()
@@ -332,20 +335,7 @@ class MainActivity : AppCompatActivity() {
         line.addView(second, LinearLayout.LayoutParams(0, -2, 1f))
         add(line, 12)
     }
-    private fun LinearLayout.addCards(items: List<View>) {
-        val columns = if (contentWidthDp >= 640 && resources.configuration.fontScale <= 1.3f) 2 else 1
-        items.chunked(columns).forEach { group ->
-            if (columns == 1) add(group.first(), 12)
-            else {
-                val line = row().apply { gravity = Gravity.TOP }
-                group.forEachIndexed { index, item ->
-                    line.addView(item, LinearLayout.LayoutParams(0, -2, 1f).apply { if (index == 0) marginEnd = dp(14) })
-                }
-                if (group.size == 1) line.addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
-                add(line, 12)
-            }
-        }
-    }
+    private fun cardColumns() = if (contentWidthDp >= 640 && resources.configuration.fontScale <= 1.3f) 2 else 1
 
     private fun switchDestination(route: String) {
         if (store.route == route) return
@@ -356,17 +346,18 @@ class MainActivity : AppCompatActivity() {
         pageHost.setCurrentItem(navigationRoutes.indexOf(route), motion)
     }
 
-    private fun captureSection() = SectionPage(pageFrame, pageScroll, pageHolder, content, libraryList, syncStatusLabel)
+    private fun captureSection() = SectionPage(pageFrame, pageScroll, pageHolder, content, sectionList, syncStatusLabel)
 
     private fun useSection(page: SectionPage) {
         pageFrame = page.frame; pageScroll = page.scroll; pageHolder = page.holder
-        content = page.content; libraryList = page.list; syncStatusLabel = page.syncLabel
+        content = page.content; sectionList = page.list; syncStatusLabel = page.syncLabel
         syncStatusLabel?.text = syncStatus
     }
 
     private fun rememberSectionScroll(route: String) {
-        if (route == "words") libraryList?.let { libraryScrollPosition = it.firstVisiblePosition to (it.getChildAt(0)?.top ?: 0) }
-        else pageScrollPositions[route] = pageScroll.scrollY
+        val list = sectionList
+        if (list == null) pageScrollPositions[route] = pageScroll.scrollY
+        else list.getChildAt(0)?.let { listScrollPositions[route] = list.firstVisiblePosition to (it.top - list.paddingTop) }
     }
 
     private fun createSection(route: String): SectionPage {
@@ -384,7 +375,7 @@ class MainActivity : AppCompatActivity() {
             pageHolder.addView(content, LinearLayout.LayoutParams(if (contentWidthDp >= 1040) dp(1040) else -1, -2))
             pageScroll.addView(pageHolder)
             pageFrame = sectionFrame(pageScroll)
-            libraryList = null; syncStatusLabel = null
+            sectionList = null; syncStatusLabel = null
             renderDestination(route)
             val scroll = pageScroll
             scroll.post { scroll.scrollTo(0, pageScrollPositions[route] ?: 0) }
@@ -401,6 +392,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun installSectionPager() {
         val initialRoute = store.route
+        sectionScrollState = ViewPager.SCROLL_STATE_IDLE
+        sectionRefreshPending = false
         sectionPages.clear()
         sectionPages[initialRoute] = captureSection()
         pageHost.pagingEnabled = initialRoute in navigationRoutes
@@ -422,6 +415,11 @@ class MainActivity : AppCompatActivity() {
         }
         pageHost.setCurrentItem(navigationRoutes.indexOf(initialRoute).coerceAtLeast(0), false)
         pageHost.addOnPageChangeListener(object : ViewPager.SimpleOnPageChangeListener() {
+            override fun onPageScrollStateChanged(state: Int) {
+                sectionScrollState = state
+                if (state == ViewPager.SCROLL_STATE_IDLE && sectionRefreshPending) postSectionRefresh()
+            }
+
             override fun onPageSelected(position: Int) {
                 if (initialRoute == "quiz") return
                 val route = navigationRoutes[position]
@@ -444,25 +442,49 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshAdjacentSections() {
-        // Update prepared neighbours after a library edit, outside the touch/animation frame.
+        if (sectionRefreshPending) return
+        sectionRefreshPending = true
+        postSectionRefresh()
+    }
+
+    private fun postSectionRefresh() {
         val host = pageHost
         host.post {
-            if (host !== pageHost) return@post
-            sectionPages.keys.filter { it != store.route }.forEach { sectionPages.remove(it) }
+            if (host !== pageHost || !sectionRefreshPending || sectionScrollState != ViewPager.SCROLL_STATE_IDLE) return@post
+            sectionRefreshPending = false
+            // Only Practice and Progress display data changed by a word checkbox.
+            val active = store.route
+            if (active == "learn" || active == "stats") rememberSectionScroll(active)
+            sectionPages.remove("learn")
+            sectionPages.remove("stats")
             host.adapter?.notifyDataSetChanged()
+            sectionPages[active]?.let(::useSection)
         }
     }
 
     private fun renderDestination(route: String = store.route) {
-        libraryList?.let { old ->
-            (content.parent as? ViewGroup)?.removeView(content)
-            pageFrame.removeView(old)
-        }
-        libraryList = null
-        if (content.parent == null) pageHolder.addView(content, LinearLayout.LayoutParams(
-            if (contentWidthDp >= 1040) dp(1040) else -1, -2))
-        pageScroll.visibility = if (route == "words") View.GONE else View.VISIBLE
         when (route) { "quiz" -> quiz(); "words" -> library(); "stats" -> stats(); "settings" -> settings(); else -> dashboard() }
+    }
+
+    private fun installSectionList(route: String, adapter: BaseAdapter, footer: View? = null) {
+        // The header and cards share one bounded scrolling surface. Offscreen rows are recycled.
+        pageHolder.removeView(content)
+        pageScroll.visibility = View.GONE
+        val list = ListView(this).apply {
+            divider = null; dividerHeight = 0
+            clipToPadding = false
+            val side = dp(if (tablet) 24 else 18)
+            setPadding(side, dp(8), side, pageScroll.paddingBottom + dp(24))
+            addHeaderView(FrameLayout(this@MainActivity).apply {
+                addView(content, FrameLayout.LayoutParams(-1, -2))
+            }, null, false)
+            footer?.let { addFooterView(it, null, false) }
+            this.adapter = adapter
+        }
+        sectionList = list
+        pageFrame.addView(list, FrameLayout.LayoutParams(
+            if (contentWidthDp >= 1040) dp(1088) else -1, -1, Gravity.CENTER_HORIZONTAL))
+        listScrollPositions[route]?.let { (row, top) -> list.setSelectionFromTop(row.coerceAtMost(list.count - 1), top) }
     }
 
     private fun render() {
@@ -535,7 +557,7 @@ class MainActivity : AppCompatActivity() {
         workspace.add(keyboardQuestion)
         pageFrame = sectionFrame(scroll)
         pageHost = SectionSwipeLayout(this)
-        libraryList = null
+        sectionList = null
         workspace.addView(pageHost, LinearLayout.LayoutParams(-1, 0, 1f))
         quizActions = column().apply {
             visibility = View.GONE
@@ -576,8 +598,11 @@ class MainActivity : AppCompatActivity() {
                 val clearance = bottom - top + dp(16)
                 if (scroll.paddingBottom != clearance) scroll.setPadding(0, 0, 0, clearance)
                 sectionPages.values.forEach { page ->
-                    page.scroll.setPadding(0, 0, 0, clearance)
-                    page.list?.let { it.setPadding(it.paddingLeft, it.paddingTop, it.paddingRight, clearance + dp(24)) }
+                    if (page.scroll.paddingBottom != clearance) page.scroll.setPadding(0, 0, 0, clearance)
+                    page.list?.let {
+                        val bottomPadding = clearance + dp(24)
+                        if (it.paddingBottom != bottomPadding) it.setPadding(it.paddingLeft, it.paddingTop, it.paddingRight, bottomPadding)
+                    }
                 }
             }
         }
@@ -587,8 +612,113 @@ class MainActivity : AppCompatActivity() {
         installSectionPager()
         ViewCompat.requestApplyInsets(root)
     }
+    private var activityMonthOffset = 0
+
+    private fun motivationCard(summary: StudyActivity.Summary): LinearLayout = card().apply {
+        add(label("好好学习，天天向上", 26f, jade, true))
+        add(label("Хорошо учись и каждый день стремись вперёд. — Мао Цзэдун", 14f, muted), 6)
+        add(label("Серия: ${summary.streak} дн. · Лучшая: ${summary.best} дн.", 20f, ink, true), 16)
+        if (summary.incompleteHistory) add(label("Серии рассчитаны по сохранившимся датам занятий.", 13f, muted), 6)
+        val today = summary.days[StudyActivity.date(System.currentTimeMillis())]?.answers ?: 0
+        add(label(if (today > 0) "Ответов сегодня: $today. Вы уже сделали шаг вперёд!"
+            else if (summary.streak > 0) "Ответьте хотя бы на один вопрос сегодня, чтобы продолжить серию."
+            else "Один ответ сегодня — начало новой серии.", 15f, muted), 8)
+    }
+
+    private fun activityCalendar(summary: StudyActivity.Summary): LinearLayout {
+        val box = card().apply { tag = "activity-calendar" }
+        // Month navigation only touches this card; reuse the already computed activity summary.
+        val months = summary.days.entries.groupBy { it.key.take(7) }
+        fun showMonth() {
+            box.removeAllViews()
+            val month = java.util.Calendar.getInstance().apply {
+                set(java.util.Calendar.DAY_OF_MONTH, 1); add(java.util.Calendar.MONTH, activityMonthOffset)
+            }
+            val prefix = StudyActivity.date(month.timeInMillis).take(7)
+            val days = months[prefix].orEmpty().associate { it.key to it.value }
+            val answers = days.values.sumOf { it.answers }
+            val correct = days.values.sumOf { it.correct }
+            box.add(label(java.text.SimpleDateFormat("LLLL yyyy", java.util.Locale.forLanguageTag("ru")).format(month.time), 22f, jade, true))
+            box.twoButtons(button("← Предыдущий месяц") { activityMonthOffset--; showMonth() },
+                button("Следующий месяц →") { activityMonthOffset++; showMonth() }.apply { isEnabled = activityMonthOffset < 0 })
+            box.add(label("Дней занятий: ${days.size} · Ответов: $answers", 17f, ink, true), 12)
+            box.add(label(if (answers > 0) "Верно: $correct · Точность: ${correct.toLong() * 100 / answers}%" else "Пока нет ответов за этот месяц.", 15f, muted), 6)
+            val details = label("Выберите день, чтобы увидеть результаты.", 15f, jade).apply {
+                tag = "activity-day-details"
+                minLines = 2
+                accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            }
+            box.add(details, 8)
+            val headers = row()
+            listOf("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс").forEach { name ->
+                headers.addView(label(name, 12f, muted).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(0, dp(32), 1f))
+            }
+            box.add(headers, 8)
+            val first = (month.get(java.util.Calendar.DAY_OF_WEEK) + 5) % 7
+            val length = month.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
+            val today = StudyActivity.date(System.currentTimeMillis())
+            var selected: TextView? = null
+            fun background(cell: TextView, key: String, count: Int, active: Boolean) {
+                cell.isSelected = active
+                cell.background = GradientDrawable().apply {
+                    cornerRadius = dp(8).toFloat()
+                    setColor(if (count > 0) jade else if (active) Color.rgb(232, 238, 226) else Color.TRANSPARENT)
+                    if (active || key == today) setStroke(dp(if (active) 3 else 2), if (active) ink else gold)
+                }
+            }
+            // A fixed six-week grid keeps the card height and scroll position stable across months.
+            repeat(6) { week ->
+                val line = row()
+                repeat(7) { column ->
+                    val day = week * 7 + column - first + 1
+                    val key = "$prefix-${day.toString().padStart(2, '0')}"
+                    val result = days[key] ?: StudyActivity.Day()
+                    val cell = label(if (day in 1..length) day.toString() else "", 15f,
+                        if (result.answers > 0) Color.WHITE else ink, key == today).apply {
+                        gravity = Gravity.CENTER
+                        if (day in 1..length) {
+                            tag = key
+                            background(this, key, result.answers, false)
+                            contentDescription = "$key: ${result.answers} ответов${if (key == today) ", сегодня" else ""}"
+                            setOnClickListener {
+                                selected?.let { previous ->
+                                    val previousKey = previous.tag as String
+                                    background(previous, previousKey, days[previousKey]?.answers ?: 0, false)
+                                }
+                                selected = this
+                                background(this, key, result.answers, true)
+                                val date = (month.clone() as java.util.Calendar).apply { set(java.util.Calendar.DAY_OF_MONTH, day) }
+                                details.text = java.text.SimpleDateFormat("d MMMM yyyy", java.util.Locale.forLanguageTag("ru")).format(date.time) + "\n" +
+                                    if (result.answers > 0) "Ответов: ${result.answers} · Верно: ${result.correct} · ${result.correct.toLong() * 100 / result.answers}%"
+                                    else "В этот день занятий не было."
+                            }
+                        }
+                    }
+                    line.addView(cell, LinearLayout.LayoutParams(0, dp(40), 1f).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) })
+                }
+                box.add(line)
+            }
+            box.add(label("Зелёный — день занятий · золотая рамка — сегодня. Письмо тоже считается.", 13f, muted), 8)
+        }
+        showMonth()
+        return box
+    }
+
+    private fun activityStatistics(summary: StudyActivity.Summary) {
+        content.add(motivationCard(summary), 16)
+        content.add(activityCalendar(summary), 16)
+        val all = card()
+        all.add(label("За всё время · вся библиотека", 22f, jade, true))
+        all.add(label("Ответов: ${summary.answers} · Верно: ${summary.correct}\nПисьменных ответов: ${summary.writing} · Дней занятий: ${summary.days.size}", 17f), 12)
+        all.add(label(if (summary.answers > 0) "Точность: ${summary.correct * 100 / summary.answers}%" else "Начните занятие — здесь появятся ваши результаты.", 15f, muted), 8)
+        all.add(label("Одинаковые карточки в разных наборах учитываются один раз. Итоги относятся к сохранённой библиотеке; отменённые ответы не считаются.", 13f, muted), 8)
+        if (summary.incompleteHistory) all.add(label("Для старых занятий сохранилась лишь часть дат: календарь, дни занятий и рекорд серии могут быть неполными. Общее число ответов сохранено.", 13f, muted), 8)
+        content.add(all, 16)
+    }
+
     private fun dashboard() {
         heading("Практика", "Выберите наборы и начните занятие.")
+        content.add(motivationCard(store.activitySummary()), 16)
         if (!store.onboardingDone) {
             val welcome = card()
             welcome.add(label("Первое занятие", 22f, jade, true))
@@ -683,6 +813,7 @@ class MainActivity : AppCompatActivity() {
             }, 12)
         }
         if (store.extraStudyTasks(newWords = false, writing = writing).isNotEmpty()) {
+            target.add(label("Знакомые слова доступны и до срока повторения. Ответы учитываются в прогрессе.", 13f, muted), 8)
             target.add(button("Практиковать знакомые слова") {
                 startExtra(newWords = false, writing = writing)
             }, 8)
@@ -969,7 +1100,7 @@ class MainActivity : AppCompatActivity() {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             minLines = 5; maxLines = 10; gravity = Gravity.TOP
         }
-        val error = label("Можно вставить JSON или ответ с одним блоком кода JSON.", 13f, muted)
+        val error = label("Можно вставить JSON или ответ с одним блоком кода JSON.", 13f, muted).apply { setTextIsSelectable(true) }
         box.add(button("Вставить из буфера") {
             val clip = (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager).primaryClip
             val value = if (clip != null && clip.itemCount > 0) clip.getItemAt(0).coerceToText(this).toString() else ""
@@ -1372,7 +1503,7 @@ class MainActivity : AppCompatActivity() {
         val search = field("Найти слово, пиньинь или перевод", "", content)
         val emptyLabel = label("Слова не найдены", 16f, muted).apply { visibility = View.GONE }
         content.add(emptyLabel, 12)
-        val columns = if (contentWidthDp >= 640 && resources.configuration.fontScale <= 1.3f) 2 else 1
+        val columns = cardColumns()
         var filtered = entries
         val adapter = object : BaseAdapter() {
             override fun getCount() = (filtered.size + columns - 1) / columns
@@ -1410,22 +1541,7 @@ class MainActivity : AppCompatActivity() {
                 return line
             }
         }
-        // The header and cards share one bounded scrolling surface. Offscreen rows are recycled.
-        pageHolder.removeView(content)
-        val list = ListView(this).apply {
-            divider = null; dividerHeight = 0
-            clipToPadding = false
-            val side = dp(if (tablet) 24 else 18)
-            setPadding(side, dp(8), side, pageScroll.paddingBottom + dp(24))
-            addHeaderView(FrameLayout(this@MainActivity).apply {
-                addView(content, FrameLayout.LayoutParams(-1, -2))
-            }, null, false)
-            this.adapter = adapter
-        }
-        libraryList = list
-        pageFrame.addView(list, FrameLayout.LayoutParams(
-            if (contentWidthDp >= 1040) dp(1088) else -1, -1, Gravity.CENTER_HORIZONTAL))
-        list.setSelectionFromTop(libraryScrollPosition.first, libraryScrollPosition.second)
+        installSectionList("words", adapter)
         search.doAfterTextChanged { text ->
             val needle = Answers.meaning(text.toString())
             filtered = if (needle.isEmpty()) entries else entries.filter { needle in it.searchText }
@@ -1511,6 +1627,7 @@ class MainActivity : AppCompatActivity() {
         val summaries = store.overview(includeTotal = true)
         val overview = summaries.dropLast(1)
         val total = summaries.last()
+        activityStatistics(store.activitySummary())
         val combined = card()
         combined.add(label("Все наборы · ${total.total} уникальных слов", 22f, jade, true))
         combined.add(label("Введено: ${total.introduced} · Слов изучено: ${total.learned}\nНавыков закреплено: ${total.mastered} · Повторений пора: ${total.due}", 17f), 12)
@@ -1572,17 +1689,59 @@ class MainActivity : AppCompatActivity() {
         }, 12)
         if (problematic.isEmpty()) content.add(label("Заданий с ошибками пока нет.", 15f, muted), 12)
         if (problematic.size > 100) content.add(label("Показаны 100 самых сложных заданий.", 13f, muted), 10)
-        val difficultCards = problematic.take(100).map { task ->
-            val w = wordsById.getValue(task.wordId); val p = store.engine.peek(task)
-            val item = card()
-            item.add(label("${w.hanzi}  ·  ${w.pinyin}", 24f, jade, true))
-            item.add(label(task.skill.title, 16f, ink), 6)
-            item.add(label("${if (p.mastered) "Закреплено" else "На повторении"} · Ошибок ${p.errors} / попыток ${p.attempts}\nВерных подряд: ${p.streak}", 14f, muted), 8)
-            item
-        }
-        content.addCards(difficultCards)
         val excluded = store.words.size * (if (store.audioEnabled) 9 else 7) - all.size
-        if (excluded > 0) content.add(label("Исключено неоднозначных направлений: $excluded. Одинаковое произношение или перевод не должны заставлять вас угадывать.", 14f, muted), 20)
+        val footer = if (excluded > 0) column().apply {
+            add(label("Исключено неоднозначных направлений: $excluded. Одинаковое произношение или перевод не должны заставлять вас угадывать.", 14f, muted), 20)
+        } else null
+        val difficult = problematic.take(100).map { task ->
+            DifficultWord(wordsById.getValue(task.wordId), task.skill, store.engine.peek(task).copy())
+        }
+        val columns = cardColumns()
+        val adapter = object : BaseAdapter() {
+            override fun getCount() = (difficult.size + columns - 1) / columns
+            override fun getItem(position: Int) = difficult[position * columns]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val line = convertView as? LinearLayout ?: row().apply {
+                    gravity = Gravity.TOP
+                    setPadding(0, dp(12), 0, 0)
+                    tag = List(columns) { index ->
+                        DifficultWordCard().also { holder ->
+                            addView(holder.view, LinearLayout.LayoutParams(0, -2, 1f).apply {
+                                if (index < columns - 1) marginEnd = dp(14)
+                            })
+                        }
+                    }
+                }
+                @Suppress("UNCHECKED_CAST")
+                val holders = line.tag as List<DifficultWordCard>
+                holders.forEachIndexed { index, holder -> holder.bind(difficult.getOrNull(position * columns + index)) }
+                return line
+            }
+        }
+        installSectionList("stats", adapter, footer)
+    }
+
+    private data class DifficultWord(val word: Word, val skill: Skill, val progress: Progress)
+
+    private inner class DifficultWordCard {
+        private val title = label("", 24f, jade, true)
+        private val skill = label("", 16f, ink)
+        private val result = label("", 14f, muted)
+        val view = card().apply {
+            add(title)
+            add(skill, 6)
+            add(result, 8)
+        }
+
+        fun bind(item: DifficultWord?) {
+            view.visibility = if (item == null) View.INVISIBLE else View.VISIBLE
+            title.text = item?.word?.let { "${it.hanzi}  ·  ${it.pinyin}" }.orEmpty()
+            skill.text = item?.skill?.title.orEmpty()
+            result.text = item?.progress?.let { p ->
+                "${if (p.mastered) "Закреплено" else "На повторении"} · Ошибок ${p.errors} / попыток ${p.attempts}\nВерных подряд: ${p.streak}"
+            }.orEmpty()
+        }
     }
     private fun settings() {
         heading("Настройки")

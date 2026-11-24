@@ -6,7 +6,7 @@ import org.json.JSONObject
 
 class StudyStore(context: Context, userId: String? = null, private val clock: () -> Long = System::currentTimeMillis) {
     val syncAccess = SyncAccess(context, userId)
-    private val prefs = profilePreferences(context, userId)
+    private val prefs = profilePreferences(context, userId).also { BookExamples.migrate(context, it) }
     private val packs = JSONObject(prefs.getString("packs", "{}")!!)
     var onSyncDataChanged: (() -> Unit)? = null
     private var lastSyncSnapshot = ""
@@ -15,12 +15,18 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
     private var wordIndex = emptyMap<SharedWords.Identity, List<MixedStudy.Origin>>()
     private val introductionKeys = mutableMapOf<SharedWords.Identity, String>()
     private val sharedOverrides = mutableMapOf<SharedWords.Identity, MutableMap<Skill, Progress?>>()
+    // Saved skill JSON objects are replaced, never edited in place. Weak keys release
+    // superseded snapshots; copies keep mutable learning state out of this read cache.
+    private val decodedProgress = java.util.WeakHashMap<JSONObject, Progress>()
+    private fun readProgress(json: JSONObject): Progress =
+        decodedProgress.getOrPut(json) { ProgressCodec.read(json) }.copy()
 
     private fun wordGroups(): Map<SharedWords.Identity, List<MixedStudy.Origin>> {
         val vocabulary = packs.keys().asSequence().associateWith { id ->
             if (id == activePackId) encodedWords() else packs.getJSONObject(id).getString("words")
         }
         if (vocabulary != indexedVocabulary) {
+            decodedVocabulary.keys.retainAll(vocabulary.values.toSet())
             wordIndex = vocabulary.flatMap { (id, text) ->
                 decodedWords(text).map { SharedWords.identity(it) to MixedStudy.Origin(id, it.id) }
             }.groupBy({ it.first }, { it.second })
@@ -96,7 +102,7 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
 
     private fun progressAt(origin: MixedStudy.Origin, skill: Skill): Progress? {
         mixed?.let { session ->
-            val id = session.occurrences.entries.firstOrNull { origin in it.value }?.key
+            val id = session.wordId(origin)
             if (id != null) return session.engine.progress[Task(id, skill).key]?.let { p ->
                 p.copy(nextAt = session.sources.first { it.id == origin.packId }.step + p.nextAt)
             }
@@ -111,11 +117,17 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         if (cached != null && cached.first == words) return cached.second
         return encodeWords(words).also { encodedVocabulary = words.toList() to it }
     }
-    private val decodedVocabulary = object : LinkedHashMap<String, List<Word>>(8, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<Word>>?) = size > 8
+    private val decodedVocabulary = mutableMapOf<String, List<Word>>()
+    private fun decodedWords(text: String): List<Word> = decodedVocabulary.getOrPut(text) {
+        // A small LRU thrashes on every traversal of a larger library. Keep only the
+        // current vocabulary versions; replacing/removing a pack releases its old one.
+        val current = packs.keys().asSequence().mapNotNull {
+            packs.getJSONObject(it).optString("words").takeIf(String::isNotEmpty)
+        }.toMutableSet()
+        encodedVocabulary?.second?.let(current::add)
+        decodedVocabulary.keys.retainAll(current)
+        decodeWords(text)
     }
-    private fun decodedWords(text: String): List<Word> =
-        decodedVocabulary.getOrPut(text) { decodeWords(text) }
 
     private var encodedSyncBase: Pair<Map<String, String>, String>? = null
     private fun syncBaseText(): String {
@@ -201,7 +213,8 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
     private var mixedPrevious = parseTask(prefs.getString("mixedPrevious", null))
     val practicePackIds = (prefs.getStringSet("practicePacks", null) ?: setOf(activePackId)).toMutableSet()
     val studyEngine: LearningEngine get() = mixedStudy()?.engine ?: engine
-    val selectedStudyWords: List<Word> get() = mixedStudy()?.words ?: words.filter { it.id in selected }
+    val selectionEngine get() = selectionStudy()?.engine ?: engine
+    val selectedStudyWords: List<Word> get() = selectionStudy()?.words ?: words.filter { it.id in selected }
     val studyWords: List<Word> get() {
         mixedStudy()?.let { return it.words }
         val focus = if (shortSession) session.optJSONArray("tasks")?.strings()?.mapNotNull { parseTask(it)?.wordId }?.toSet() else null
@@ -238,6 +251,7 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
     private val introductions = JSONObject(prefs.getString("introductions", "{}")!!)
     var session = JSONObject(prefs.getString("shortSession", "{}")!!)
         private set
+    val packReview get() = session.optBoolean("packReview")
     val shortSession get() = session.optBoolean("active")
     // Older extra-learning sessions stored "balanced"; resume them with normal scheduling too.
     val sessionUsesSchedule get() = session.optBoolean("scheduled", session.optBoolean("balanced"))
@@ -263,7 +277,7 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         clearQuestion()
         studyEngine.previous = null
         // A fresh session must never reset memory strength, learning steps or real due times.
-        if (restartShort) beginSession(timed, focus, scheduled)
+        if (restartShort) beginSession(timed, focus, scheduled, packReview)
         else { session = JSONObject(); practiceDay = today(); touchPractice(); save() }
         return true
     }
@@ -280,21 +294,32 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
                 .put("meanings", JSONArray(identity.meanings)).toString()
         }
     }
-    fun needsPreview(word: Word) = !introductions.has(introductionKey(word)) &&
-        Skill.entries.none { studyEngine.progress[Task(word.id, it).key]?.let { p -> p.attempts > 0 || p.mastered } == true }
-    fun introduce(word: Word) { touchPractice(); introductions.put(introductionKey(word), today()); savePractice() }
-    /** Extra study respects selection and leaves the daily introduction setting unchanged. */
-    fun extraStudyTasks(newWords: Boolean, writing: Boolean = this.writing): List<Task> {
-        // Generate against the full selection to preserve ambiguity and audio exclusions.
-        // A finished focused session exposes only its own words through studyWords.
-        val selection = selectedStudyWords
-        val available = ListeningAvailability.filter(
-            studyEngine.tasks(selection, writing, audioEnabled), selection, audioProvider)
-        val availableIds = available.map { it.wordId }.toSet()
-        val words = selection.filter { it.id in availableIds && needsPreview(it) == newWords }
-        val ids = (if (newWords) words.take(5) else words).map { it.id }.toSet()
-        return available.filter { it.wordId in ids }
+    fun needsPreview(word: Word, source: LearningEngine = studyEngine) = !introductions.has(introductionKey(word)) &&
+        Skill.entries.none { source.progress[Task(word.id, it).key]?.let { p -> p.attempts > 0 || p.mastered } == true }
+    fun introduce(word: Word) {
+        touchPractice()
+        introductions.put(introductionKey(word), today())
+        savePractice(introductionsChanged = true)
     }
+    data class ExtraStudyOptions(val fresh: List<Task>, val familiar: List<Task>)
+    fun extraStudyOptions(writing: Boolean = this.writing): ExtraStudyOptions {
+        val selection = selectedStudyWords
+        val source = selectionEngine
+        val available = ListeningAvailability.filter(
+            source.tasks(selection, writing, audioEnabled), selection, audioProvider)
+        val freshIds = selection.asSequence().filter { needsPreview(it, source) }.map { it.id }.toSet()
+        val batch = freshIds.take(5).toSet()
+        val fresh = mutableListOf<Task>()
+        val familiar = mutableListOf<Task>()
+        for (task in available) {
+            if (task.wordId in batch) fresh.add(task)
+            else if (task.wordId !in freshIds) familiar.add(task)
+        }
+        return ExtraStudyOptions(fresh, familiar)
+    }
+    fun extraStudyTasks(newWords: Boolean, writing: Boolean = this.writing): List<Task> =
+        extraStudyOptions(writing).let { if (newWords) it.fresh else it.familiar }
+
     fun beginExtraStudy(newWords: Boolean, writing: Boolean = this.writing): Boolean {
         val focus = extraStudyTasks(newWords, writing)
         if (focus.isEmpty()) return false
@@ -307,16 +332,27 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         if (shortSession && session.has("tasks")) return words
         val date = today()
         val used = introductions.keys().asSequence().count { introductions.optString(it) == date }
-        val fresh = words.filter { needsPreview(it) }.take((dailyNewWords - used).coerceAtLeast(0)).map { it.id }.toSet()
-        return words.filter { !needsPreview(it) || it.id in fresh }
+        var remaining = (dailyNewWords - used).coerceAtLeast(0)
+        val source = studyEngine
+        return words.filter { word ->
+            if (!needsPreview(word, source)) true
+            else if (remaining > 0) { remaining--; true }
+            else false
+        }
     }
-    fun beginSession(minutes: Boolean = false, focus: List<Task>? = null, scheduled: Boolean = false) {
+    fun beginSession(minutes: Boolean = false, focus: List<Task>? = null, scheduled: Boolean = false, packReview: Boolean = false) {
+        if (packReview && mixed != null) { save(); mixed = null }
         practiceDay = today()
         touchPractice()
         clearQuestion()
-        session = JSONObject().put("active", true).put("limit", if (minutes) 0 else 10)
+        val limit = when {
+            minutes -> 0
+            packReview -> minOf(10, requireNotNull(focus).size)
+            else -> 10
+        }
+        session = JSONObject().put("active", true).put("limit", limit)
             .put("until", if (minutes) clock() + 300_000L else 0L)
-            .put("count", 0).put("correct", 0).put("scheduled", scheduled)
+            .put("packReview", packReview).put("count", 0).put("correct", 0).put("scheduled", scheduled)
         focus?.let { session.put("tasks", JSONArray(it.map { task -> task.key })) }
         save()
     }
@@ -373,21 +409,26 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
             members.forEach { introductions.remove("${it.packId}/${it.wordId}") }
         }
     }
-    private fun mixedStudy(): MixedStudy? {
-        if (practicePackIds == setOf(activePackId)) return null
-        if (mixed == null) {
-            val sources = packNames.filter { it.first in practicePackIds }.map { (id, _) ->
-                if (id == activePackId) MixedStudy.Source(id, words.toList(), selected.toSet(), engine.progress.mapValues { it.value.copy() }, engine.step)
-                else {
-                    val pack = packs.getJSONObject(id)
-                    val progress = pack.getJSONObject("progress")
-                    MixedStudy.Source(id, decodedWords(pack.getString("words")), pack.getJSONArray("selected").strings().toSet(),
-                        progress.keys().asSequence().associateWith { readProgress(progress.getJSONObject(it)) }, pack.optInt("step"))
-                }
+    private fun mixedStudy(): MixedStudy? = if (packReview) null else selectionStudy()
+    // Dashboard data can be requested while a single-pack review is paused.
+    // Keep that read-only snapshot separate from the engine that flushMixed writes back.
+    private var reviewSelection: MixedStudy? = null
+    private fun selectionStudy(): MixedStudy? {
+        if (practicePackIds.size == 1 && activePackId in practicePackIds) return null
+        (if (packReview) reviewSelection else mixed)?.let { return it }
+        val sources = packNames.filter { it.first in practicePackIds }.map { (id, _) ->
+            if (id == activePackId) MixedStudy.Source(id, words.toList(), selected.toSet(), engine.progress.mapValues { it.value.copy() }, engine.step)
+            else {
+                val pack = packs.getJSONObject(id)
+                val progress = pack.getJSONObject("progress")
+                MixedStudy.Source(id, decodedWords(pack.getString("words")), pack.getJSONArray("selected").strings().toSet(),
+                    progress.keys().asSequence().associateWith { readProgress(progress.getJSONObject(it)) }, pack.optInt("step"))
             }
-            mixed = MixedStudy(sources).also { it.engine.previous = mixedPrevious }
         }
-        return mixed
+        return MixedStudy(sources).also {
+            it.engine.previous = mixedPrevious
+            if (packReview) reviewSelection = it else mixed = it
+        }
     }
     private fun flushMixed() {
         mixed?.let { session -> session.sources.forEach { source ->
@@ -523,7 +564,7 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
             val rebuilt = mixedStudy()!!
             fun remap(task: Task?): Task? = task?.let { old ->
                 val origin = oldSession.origins[old.wordId]
-                rebuilt.occurrences.entries.firstOrNull { origin in it.value }?.let { Task(it.key, old.skill) }
+                origin?.let(rebuilt::wordId)?.let { Task(it, old.skill) }
             }
             current = remap(current)
             rebuilt.engine.previous = remap(oldSession.engine.previous)
@@ -570,6 +611,8 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         shareResult(word, task.skill, studyEngine.progress[task.key], studyEngine.step)
         if (shortSession) {
             this.session.put("count", sessionCount + 1).put("correct", sessionCorrect + if (correct) 1 else 0)
+            if (packReview && !correct) this.session.put("missed",
+                (this.session.optJSONArray("missed") ?: JSONArray()).put(task.key))
             if (this.session.has("tasks")) this.session.put("reviewed",
                 JSONArray((this.session.optJSONArray("reviewed")?.strings().orEmpty() + task.key).distinct()))
         }
@@ -601,9 +644,10 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         progress.keys().forEach { engine.progress[it] = readProgress(progress.getJSONObject(it)) }
         engine.step = active.getInt("step")
         engine.previous = if (undo.isNull("activePrevious")) null else parseTask(undo.getString("activePrevious"))
-        mixedPrevious = if (undo.isNull("previous")) null else parseTask(undo.getString("previous"))
+        if (!packReview) mixedPrevious = if (undo.isNull("previous")) null else parseTask(undo.getString("previous"))
         if (shortSession) session.put("count", undo.optInt("sessionCount")).put("correct", undo.optInt("sessionCorrect"))
             .put("reviewed", undo.optJSONArray("sessionReviewed") ?: JSONArray())
+        if (packReview) session.put("missed", JSONArray(session.optJSONArray("missed")?.strings().orEmpty() - key))
         answerIgnored = true; answerUndo = null; beforeAnswer = null
         save()
         // Keep the revealed answer visible, but it can no longer be scored a second time.
@@ -629,6 +673,14 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
             it.wordId in eligible && (!shortSession || focus == null || it.key in focus)
         }
     }
+    fun hardReviewTasks(available: List<Task> = ListeningAvailability.filter(
+        engine.tasks(words, false, audioEnabled), words, audioProvider) + engine.tasks(words, true, false)
+    ): List<Task> = RecallDifficulty.rank(available.filterNot { engine.peek(it).mastered }, engine.progress)
+
+    fun missedReviewTasks(): List<Task> {
+        val missed = session.optJSONArray("missed")?.strings()?.toSet().orEmpty()
+        return tasks().filter { it.key in missed }
+    }
     fun clearQuestion() { current = null; feedback = null; revealed = false; draft = ""; toneDraft.clear(); choices = emptyList(); beforeAnswer = null; answerUndo = null; answerIgnored = false; strokes = "" }
     fun nextQuestion() {
         refreshPractice()
@@ -643,26 +695,32 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         val candidates = if (manualDrill) available.filter { it.key !in reviewed } else available
         // Scheduled study retains normal due times, learning priority and sibling spacing.
         // Only explicitly chosen drills can force an early review once per skill.
-        current = studyEngine.next(candidates, now = clock())
+        current = if (packReview) {
+            val byKey = candidates.associateBy { it.key }
+            session.getJSONArray("tasks").strings().firstNotNullOfOrNull(byKey::get)
+        } else studyEngine.next(candidates, now = clock())
             ?: if (manualDrill) studyEngine.nextEarlyReview(candidates) else null
         if (current == null && shortSession) session.put("finished", true)
-        current?.let { task ->
+        current?.takeIf { it.skill in characterSkills }?.let { task ->
+            val source = studyEngine
             val word = studyWords.first { it.id == task.wordId }
-            val confused = studyEngine.peek(task).confusions.entries
+            val confused = source.peek(task).confusions.entries
                 .filter { !word.acceptsForm(it.key) }.sortedByDescending { it.value }.map { it.key }
             val reciprocal = (mixedStudy()?.words ?: words).filter { other -> other.id != word.id &&
-                studyEngine.progress[Task(other.id, task.skill).key]?.confusions?.keys?.any { word.acceptsForm(it) } == true
+                source.progress[Task(other.id, task.skill).key]?.confusions?.keys?.any { word.acceptsForm(it) } == true
             }.map { it.hanzi }
             val comparisons = (confused + reciprocal).filter { !word.acceptsForm(it) }.distinct()
-            choices = if (task.skill in characterSkills && comparisons.isNotEmpty())
-                (comparisons.take(3) + word.hanzi).shuffled() else studyEngine.options(word)
+            choices = if (comparisons.isNotEmpty())
+                (comparisons.take(3) + word.hanzi).shuffled() else source.options(word)
         }
         savePractice()
     }
     /** A new prompt or preview changes session state, not vocabulary or recorded memory. */
-    private fun savePractice() {
-        prefs.edit().putLong("lastPracticeAt", lastPracticeAt).putString("practiceDay", practiceDay)
-            .putString("shortSession", session.toString()).putString("introductions", introductions.toString())
+    private fun savePractice(introductionsChanged: Boolean = false) {
+        val editor = prefs.edit()
+        if (introductionsChanged) editor.putString("introductions", introductions.toString())
+        editor.putLong("lastPracticeAt", lastPracticeAt).putString("practiceDay", practiceDay)
+            .putString("shortSession", session.toString())
             .putBoolean("writing", writing).putString("route", route).putString("current", current?.key)
             .putInt("feedback", feedback?.let { if (it) 1 else 0 } ?: -1)
             .putBoolean("revealed", revealed).putString("draft", draft)
@@ -672,6 +730,7 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
             .putString("strokes", strokes).apply()
     }
     fun save() {
+        reviewSelection = null
         if (lastPracticeAt == 0L && (current != null || shortSession)) touchPractice()
         mixed?.let { mixedPrevious = it.engine.previous }
         flushMixed()
@@ -920,8 +979,9 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         val mastered: Int, val due: Int, val skills: Map<Skill, List<Progress>>)
 
     fun activitySummary(): StudyActivity.Summary {
+        val groups = wordGroups().values
         val skills = Skill.entries.associateWith { skill ->
-            wordGroups().values.mapNotNull { origins ->
+            groups.mapNotNull { origins ->
                 SharedWords.merge(origins.mapNotNull { progressAt(it, skill) })
             }
         }
@@ -1092,22 +1152,22 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
                 .put("example", w.example).put("examplePinyin", w.examplePinyin).put("exampleTranslation", w.exampleTranslation)
         })).toString(2)
         val seedJson = """[
-          {"id":"water","hanzi":"水","pinyin":"shuǐ","numbered":"shui3","meanings":["вода"],"distractors":["永","冰","泳","求"],"hint":"水 — вода. У 永 есть дополнительная точка сверху."},
-          {"id":"fire","hanzi":"火","pinyin":"huǒ","numbered":"huo3","meanings":["огонь","пламя"],"distractors":["人","大","灭","犬"],"hint":"Две боковые черты напоминают языки пламени."},
-          {"id":"tree","hanzi":"木","pinyin":"mù","numbered":"mu4","meanings":["дерево","древесина"],"distractors":["本","末","未","术"],"hint":"Ствол и ветви. У 本 есть дополнительная черта у корня."},
-          {"id":"person","hanzi":"人","pinyin":"rén","numbered":"ren2","meanings":["человек","люди"],"distractors":["入","八","大","个"],"hint":"人 и 入 похожи: обращайте внимание на соединение черт сверху."},
-          {"id":"mouth","hanzi":"口","pinyin":"kǒu","numbered":"kou3","meanings":["рот"],"distractors":["日","回","田","目"],"hint":"Внутри 口 нет черт."},
-          {"id":"sun","hanzi":"日","pinyin":"rì","numbered":"ri4","meanings":["солнце","день"],"distractors":["目","曰","白","田"],"hint":"Одна горизонтальная черта внутри; у 目 их две."},
-          {"id":"moon","hanzi":"月","pinyin":"yuè","numbered":"yue4","meanings":["луна","месяц"],"distractors":["目","用","日","且"],"hint":"月 означает и луну, и календарный месяц."},
-          {"id":"mountain","hanzi":"山","pinyin":"shān","numbered":"shan1","meanings":["гора","горы"],"distractors":["出","仙","凶","屮"],"hint":"Три вершины, средняя выше остальных."},
-          {"id":"big","hanzi":"大","pinyin":"dà","numbered":"da4","meanings":["большой","крупный","большая","большое"],"distractors":["太","天","犬","夫"],"hint":"Человек с раскинутыми руками. У 太 есть точка."},
-          {"id":"small","hanzi":"小","pinyin":"xiǎo","numbered":"xiao3","meanings":["маленький","малый","небольшой","маленькая","маленькое"],"distractors":["少","水","木","尔"],"hint":"У 少 есть дополнительная наклонная черта снизу."},
-          {"id":"woman","hanzi":"女","pinyin":"nǚ","numbered":"nü3","meanings":["женщина","женский"],"distractors":["文","母","安","汝"],"hint":"При вводе можно писать nǚ, nü3, nv3 или nu:3."},
-          {"id":"child","hanzi":"子","pinyin":"zǐ","numbered":"zi3","meanings":["ребенок","дитя","сын"],"distractors":["孑","了","字","予"],"hint":"В 子 длинная горизонтальная черта пересекает середину."},
-          {"id":"good","hanzi":"好","pinyin":"hǎo","numbered":"hao3","meanings":["хороший","хорошо","хорошая","хорошее"],"distractors":["妈","她","如","妹"],"hint":"В этой карточке 好 читается hǎo: хороший. Справа — 子."},
-          {"id":"china","hanzi":"中国","pinyin":"Zhōngguó","numbered":"zhong1 guo2","meanings":["китай"],"distractors":["中园","串国","忠国","申国"],"hint":"中 — середина; 国 — страна. Используем упрощённое 国 (традиционное 國)."},
-          {"id":"student","hanzi":"学生","pinyin":"xuésheng","numbered":"xue2 sheng5","meanings":["ученик","ученица","студент","студентка","учащийся"],"distractors":["学牛","字生","学王","宇生"],"hint":"В этом слове второй слог нейтральный: xuésheng. У 生 на одну черту больше, чем у 牛."},
-          {"id":"hello","hanzi":"你好","pinyin":"nǐ hǎo","numbered":"ni3 hao3","meanings":["привет","здравствуйте","здравствуй"],"distractors":["你妤","他好","你妈","妳好"],"alternatives":["妳好"],"hint":"Словарные тоны: 3 + 3. В связной речи первый третий тон обычно звучит как второй."}
+          {"id":"water","hanzi":"水","pinyin":"shuǐ","numbered":"shui3","meanings":["вода"],"distractors":["永","冰","泳","求"],"hint":"水 — вода. У 永 есть дополнительная точка сверху.","example":"给我一杯水，好吗？","examplePinyin":"Gěi wǒ yì bēi shuǐ, hǎo ma?","exampleTranslation":"Можно мне стакан воды?"},
+          {"id":"fire","hanzi":"火","pinyin":"huǒ","numbered":"huo3","meanings":["огонь","пламя"],"distractors":["人","大","灭","犬"],"hint":"Две боковые черты напоминают языки пламени.","example":"快把火关了！","examplePinyin":"Kuài bǎ huǒ guān le!","exampleTranslation":"Скорее выключи огонь!"},
+          {"id":"tree","hanzi":"木","pinyin":"mù","numbered":"mu4","meanings":["дерево","древесина"],"distractors":["本","末","未","术"],"hint":"Ствол и ветви. У 本 есть дополнительная черта у корня.","example":"这张桌子是木头做的。","examplePinyin":"Zhè zhāng zhuōzi shì mùtou zuò de.","exampleTranslation":"Этот стол сделан из дерева."},
+          {"id":"person","hanzi":"人","pinyin":"rén","numbered":"ren2","meanings":["человек","люди"],"distractors":["入","八","大","个"],"hint":"人 и 入 похожи: обращайте внимание на соединение черт сверху.","example":"这里人很多。","examplePinyin":"Zhèlǐ rén hěn duō.","exampleTranslation":"Здесь много людей."},
+          {"id":"mouth","hanzi":"口","pinyin":"kǒu","numbered":"kou3","meanings":["рот"],"distractors":["日","回","田","目"],"hint":"Внутри 口 нет черт.","example":"请张开口。","examplePinyin":"Qǐng zhāngkāi kǒu.","exampleTranslation":"Пожалуйста, откройте рот."},
+          {"id":"sun","hanzi":"日","pinyin":"rì","numbered":"ri4","meanings":["солнце","день"],"distractors":["目","曰","白","田"],"hint":"Одна горизонтальная черта внутри; у 目 их две.","example":"今天是几月几日？","examplePinyin":"Jīntiān shì jǐ yuè jǐ rì?","exampleTranslation":"Какое сегодня число?"},
+          {"id":"moon","hanzi":"月","pinyin":"yuè","numbered":"yue4","meanings":["луна","месяц"],"distractors":["目","用","日","且"],"hint":"月 означает и луну, и календарный месяц.","example":"你几月来？","examplePinyin":"Nǐ jǐ yuè lái?","exampleTranslation":"В каком месяце ты приедешь?"},
+          {"id":"mountain","hanzi":"山","pinyin":"shān","numbered":"shan1","meanings":["гора","горы"],"distractors":["出","仙","凶","屮"],"hint":"Три вершины, средняя выше остальных.","example":"周末去爬山吧。","examplePinyin":"Zhōumò qù pá shān ba.","exampleTranslation":"Давай на выходных сходим в горы."},
+          {"id":"big","hanzi":"大","pinyin":"dà","numbered":"da4","meanings":["большой","крупный","большая","большое"],"distractors":["太","天","犬","夫"],"hint":"Человек с раскинутыми руками. У 太 есть точка.","example":"这件太大了。","examplePinyin":"Zhè jiàn tài dà le.","exampleTranslation":"Эта вещь слишком большая."},
+          {"id":"small","hanzi":"小","pinyin":"xiǎo","numbered":"xiao3","meanings":["маленький","малый","небольшой","маленькая","маленькое"],"distractors":["少","水","木","尔"],"hint":"У 少 есть дополнительная наклонная черта снизу.","example":"有小一点的吗？","examplePinyin":"Yǒu xiǎo yìdiǎn de ma?","exampleTranslation":"Есть поменьше?"},
+          {"id":"woman","hanzi":"女","pinyin":"nǚ","numbered":"nü3","meanings":["женщина","женский"],"distractors":["文","母","安","汝"],"hint":"При вводе можно писать nǚ, nü3, nv3 или nu:3.","example":"她是我们的女老师。","examplePinyin":"Tā shì wǒmen de nǚ lǎoshī.","exampleTranslation":"Она наша учительница."},
+          {"id":"child","hanzi":"子","pinyin":"zǐ","numbered":"zi3","meanings":["ребенок","дитя","сын"],"distractors":["孑","了","字","予"],"hint":"В 子 длинная горизонтальная черта пересекает середину.","example":"他们是父子。","examplePinyin":"Tāmen shì fùzǐ.","exampleTranslation":"Они отец и сын."},
+          {"id":"good","hanzi":"好","pinyin":"hǎo","numbered":"hao3","meanings":["хороший","хорошо","хорошая","хорошее"],"distractors":["妈","她","如","妹"],"hint":"В этой карточке 好 читается hǎo: хороший. Справа — 子.","example":"这个办法很好。","examplePinyin":"Zhège bànfǎ hěn hǎo.","exampleTranslation":"Это очень хороший способ."},
+          {"id":"china","hanzi":"中国","pinyin":"Zhōngguó","numbered":"zhong1 guo2","meanings":["китай"],"distractors":["中园","串国","忠国","申国"],"hint":"中 — середина; 国 — страна. Используем упрощённое 国 (традиционное 國).","example":"我在中国学中文。","examplePinyin":"Wǒ zài Zhōngguó xué Zhōngwén.","exampleTranslation":"Я учу китайский в Китае."},
+          {"id":"student","hanzi":"学生","pinyin":"xuésheng","numbered":"xue2 sheng5","meanings":["ученик","ученица","студент","студентка","учащийся"],"distractors":["学牛","字生","学王","宇生"],"hint":"В этом слове второй слог нейтральный: xuésheng. У 生 на одну черту больше, чем у 牛.","example":"你也是学生吗？","examplePinyin":"Nǐ yě shì xuésheng ma?","exampleTranslation":"Ты тоже учишься?"},
+          {"id":"hello","hanzi":"你好","pinyin":"nǐ hǎo","numbered":"ni3 hao3","meanings":["привет","здравствуйте","здравствуй"],"distractors":["你妤","他好","你妈","妳好"],"alternatives":["妳好"],"hint":"Словарные тоны: 3 + 3. В связной речи первый третий тон обычно звучит как второй.","example":"你好，请问车站在哪儿？","examplePinyin":"Nǐ hǎo, qǐngwèn chēzhàn zài nǎr?","exampleTranslation":"Здравствуйте, подскажите, где остановка?"}
         ]"""
     }
 }

@@ -71,6 +71,35 @@ class LearningFlowTest {
             onView(withText("Дальше")).check(matches(isCompletelyDisplayed())).perform(click())
         }
     }
+    @Test fun speechExampleSupportsRecallBeforeAndAfterTheQuestion() {
+        val store = StudyStore(context)
+        val word = store.words.first { it.id == "water" }
+        store.route = "quiz"
+        store.current = Task(word.id, Skill.CHARACTER_MEANING)
+        store.save()
+
+        fun checkExample() {
+            onView(withText(word.example)).perform(scrollTo()).check(matches(isDisplayed()))
+            onView(withText(word.exampleTranslation)).check(matches(withEffectiveVisibility(Visibility.GONE)))
+            onView(withText("Показать разбор")).perform(scrollTo(), click())
+            for (text in listOf(word.examplePinyin, word.exampleTranslation, word.hint)) {
+                onView(withText(text)).perform(scrollTo()).check(matches(isDisplayed()))
+            }
+            onView(withText("Скрыть разбор")).perform(scrollTo(), click())
+            onView(withText(word.examplePinyin)).check(matches(withEffectiveVisibility(Visibility.GONE)))
+        }
+
+        ActivityScenario.launch(MainActivity::class.java).use {
+            checkExample()
+            onView(withText("Запомнил — к вопросам")).perform(click())
+            onView(withText(word.example)).check(doesNotExist())
+            onView(withHint("Русский перевод")).perform(replaceText("вода"), closeSoftKeyboard())
+            onView(withText("Проверить")).perform(click())
+            checkExample()
+            onView(withText("Дальше")).check(matches(isCompletelyDisplayed()))
+        }
+    }
+
     @Test fun missingToneFails() {
         val store = StudyStore(context)
         store.introduce(store.words.first { it.id == "water" }) // These regressions exercise an already-previewed word.
@@ -100,7 +129,9 @@ class LearningFlowTest {
         store.route = "quiz"; store.current = Task("water", Skill.CHARACTER_TONE); store.save()
         ActivityScenario.launch(MainActivity::class.java).use {
             onView(withText("shuǐ")).check(doesNotExist())
-            onView(withText("3   mǎ  · нисходяще-восходящий")).perform(scrollTo(), click())
+            val thirdTone = onView(withContentDescription("3   mǎ  · нисходяще-восходящий"))
+            if (context.resources.configuration.smallestScreenWidthDp >= 600) thirdTone.perform(scrollTo())
+            thirdTone.check(matches(isCompletelyDisplayed())).perform(click())
             assertEquals(Fsrs.Phase.LEARNING, StudyStore(context).engine.state(Task("water", Skill.CHARACTER_TONE)).memory!!.phase)
         }
     }

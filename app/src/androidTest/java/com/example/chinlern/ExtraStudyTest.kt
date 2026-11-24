@@ -198,6 +198,27 @@ class ExtraStudyTest {
         }
     }
 
+    @Test fun oneSelectedWordCanRepeatAfterHardReviewAndWritingDrills() {
+        val now = System.currentTimeMillis()
+        var store = StudyStore(context, clock = { now })
+        val word = store.words.first()
+        store.selected.retainAll(setOf(word.id))
+        store.introduce(word)
+        val task = Task(word.id, Skill.WRITING)
+        store.beginSession(focus = listOf(task), packReview = true)
+        repeat(3) {
+            store.nextQuestion()
+            assertEquals(task, store.current)
+            store.recordAnswer(true)
+            store.nextQuestion()
+            assertTrue(store.sessionFinished)
+            store = StudyStore(context, clock = { now })
+            assertTrue(store.beginExtraStudy(newWords = false, writing = true))
+            assertFalse(store.packReview)
+        }
+        assertEquals(3, store.engine.peek(task).attempts)
+    }
+
     @Test fun extraWordsRespectSelectionWritingAndExhaustion() {
         val store = StudyStore(context)
         val word = store.studyWords.last()
@@ -260,6 +281,23 @@ class ExtraStudyTest {
         ActivityScenario.launch(MainActivity::class.java).use {
             onView(withText("Учить ещё: 5 новых слов")).perform(scrollToPracticeControl(), click())
             onView(withText("Новое слово")).check(matches(isDisplayed()))
+        }
+    }
+
+    @Test fun continueAfterExhaustedScheduledSessionStartsAnswerablePractice() {
+        val store = StudyStore(context)
+        store.onboardingDone = true
+        store.selectedStudyWords.forEach(store::introduce)
+        store.tasks().forEach { store.studyEngine.state(it).apply { attempts = 1; due = Long.MAX_VALUE } }
+        store.beginSession()
+        store.route = "quiz"
+        store.nextQuestion()
+        assertTrue(store.sessionFinished)
+        ActivityScenario.launch(MainActivity::class.java).use {
+            onView(withText("Ещё 10 вопросов")).perform(scrollToPracticeControl(), click())
+            val reopened = StudyStore(context)
+            assertNotNull(reopened.current)
+            assertFalse(reopened.sessionFinished)
         }
     }
 

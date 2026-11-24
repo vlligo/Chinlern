@@ -12,11 +12,16 @@ class Pronunciation(private val activity: Activity, private val status: (String?
     private val startExternal: (Intent) -> Unit = { activity.startActivity(it) }) {
     private var tts: TextToSpeech? = null
     private var ready = false
+    private var initialized = false
+    private var pendingDevice: Pair<Word, Boolean>? = null
+    private var closed = false
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private var pendingHanping: Runnable? = null
     private var hanpingBusyUntil = 0L
     init {
         tts = TextToSpeech(activity) { result ->
+            if (closed) return@TextToSpeech
+            initialized = true
             if (result == TextToSpeech.SUCCESS) {
                 val available = tts?.setLanguage(Locale.SIMPLIFIED_CHINESE) ?: TextToSpeech.LANG_NOT_SUPPORTED
                 ready = available >= TextToSpeech.LANG_AVAILABLE
@@ -24,6 +29,9 @@ class Pronunciation(private val activity: Activity, private val status: (String?
                 tts?.voices?.firstOrNull { it.locale.language == "zh" && !it.isNetworkConnectionRequired && it.locale.country == "CN" }?.let { tts?.voice = it }
             }
             status(if (ready) null else "Китайский голос недоступен. Добавьте его в настройках озвучивания или выберите Hanping.")
+            val waiting = pendingDevice
+            pendingDevice = null
+            if (ready && waiting != null) play(waiting.first, "system", waiting.second)?.let(status)
         }
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) = Unit
@@ -37,7 +45,10 @@ class Pronunciation(private val activity: Activity, private val status: (String?
         })
     }
     fun play(word: Word, provider: String, slow: Boolean): String? {
+        if (closed) return null
         if (provider == "hanping") {
+            pendingDevice = null
+            tts?.stop()
             pendingHanping?.let { handler.removeCallbacks(it) }
             val wait = (hanpingBusyUntil - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0)
             if (wait > 0) {
@@ -50,6 +61,11 @@ class Pronunciation(private val activity: Activity, private val status: (String?
             return launchHanping(word)
         }
         pendingHanping?.let { handler.removeCallbacks(it) }; pendingHanping = null
+        if (!initialized) {
+            pendingDevice = word to slow
+            status("Подготавливаем китайский голос…")
+            return null
+        }
         if (!ready) return "Китайский голос ещё не готов или не установлен. Откройте настройки озвучивания."
         tts?.setSpeechRate(if (slow) 0.65f else 0.9f)
         return if (tts?.speak(word.hanzi, TextToSpeech.QUEUE_FLUSH, null, "chinlearn-word") == TextToSpeech.SUCCESS) null
@@ -77,6 +93,6 @@ class Pronunciation(private val activity: Activity, private val status: (String?
         null
     } catch (_: ActivityNotFoundException) { "Словарь не установлен." }
       catch (_: SecurityException) { "Не удалось открыть словарь." }
-    fun stop() { pendingHanping?.let { handler.removeCallbacks(it) }; pendingHanping = null; tts?.stop() }
-    fun close() { stop(); tts?.shutdown() }
+    fun stop() { pendingDevice = null; pendingHanping?.let { handler.removeCallbacks(it) }; pendingHanping = null; tts?.stop() }
+    fun close() { closed = true; stop(); tts?.shutdown() }
 }

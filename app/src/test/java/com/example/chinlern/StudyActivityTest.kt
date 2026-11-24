@@ -53,4 +53,17 @@ class StudyActivityTest {
         assertEquals(1, summary.days.values.single().answers)
         assertTrue(summary.incompleteHistory)
     }
+
+    @Test fun cachedDateValidationStillRejectsInvalidDatesAndCounts() {
+        fun json(date: String, answers: Int = 1, correct: Int = 1) = org.json.JSONObject()
+            .put("activity", org.json.JSONObject().put(date, org.json.JSONArray(listOf(answers, correct))))
+        repeat(2) {
+            assertEquals(1, ProgressCodec.read(json("2024-02-29")).activity.size)
+            for (date in listOf("2026-02-29", "2026-04-31", "2026-13-01", "2026-1-01")) {
+                assertTrue(runCatching { ProgressCodec.read(json(date)) }.isFailure)
+            }
+            assertTrue(runCatching { ProgressCodec.read(json("2024-02-29", 1, 2)) }.isFailure)
+            assertTrue(runCatching { ProgressCodec.read(json("2024-02-29", 0, 0)) }.isFailure)
+        }
+    }
 }

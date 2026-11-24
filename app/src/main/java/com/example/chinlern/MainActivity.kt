@@ -8,6 +8,10 @@ import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.BackgroundColorSpan
+import android.text.style.StyleSpan
 import android.text.InputType
 import android.view.DragEvent
 import android.view.Gravity
@@ -17,16 +21,19 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.*
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.BackEventCompat
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.doOnPreDraw
 import androidx.core.widget.doAfterTextChanged
 import androidx.viewpager.widget.PagerAdapter
 import androidx.viewpager.widget.ViewPager
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.navigation.NavigationBarView
 import com.google.android.material.bottomnavigation.BottomNavigationView
@@ -60,7 +67,7 @@ class MainActivity : AppCompatActivity() {
     private val sectionPages = mutableMapOf<String, SectionPage>()
     private data class SectionPage(
         val frame: FrameLayout, val scroll: ScrollView, val holder: LinearLayout,
-        val content: LinearLayout, val list: ListView?, val syncLabel: TextView?
+        val content: LinearLayout, val list: ListView?, val syncLabel: TextView?, val ready: Boolean = true
     )
     private var bottomNavigation: BottomNavigationView? = null
     private var sectionList: ListView? = null
@@ -70,13 +77,44 @@ class MainActivity : AppCompatActivity() {
     private val railItems = mutableMapOf<String, MaterialButton>()
     private val pageScrollPositions = mutableMapOf<String, Int>()
     private val navigationRoutes = listOf("learn", "words", "stats", "settings")
+    private val backMotion = BackNavigationMotion()
+    private val backCallback = object : OnBackPressedCallback(false) {
+        override fun handleOnBackStarted(backEvent: BackEventCompat) {
+            backMotion.start(pageHost)
+        }
+
+        override fun handleOnBackProgressed(backEvent: BackEventCompat) {
+            backMotion.progress(backEvent)
+        }
+
+        override fun handleOnBackCancelled() {
+            backMotion.cancel()
+            if (sectionRefreshPending) postSectionRefresh()
+        }
+
+        override fun handleOnBackPressed() {
+            backMotion.reset()
+            if (store.route in navigationRoutes) {
+                // Reuse the live destination, including its scroll position. Jump directly
+                // home instead of scrolling past every intervening section.
+                pageHost.setCurrentItem(0, false)
+            } else {
+                store.route = "learn"
+                render()
+            }
+            backMotion.enter(pageFrame)
+            if (sectionRefreshPending) postSectionRefresh()
+        }
+    }
     private lateinit var content: LinearLayout
     private lateinit var quizActions: LinearLayout
+    private lateinit var quizDock: QuizActionDock
+    private var lastListeningPrompt: String? = null
+    private var pendingListening: Runnable? = null
     private lateinit var keyboardQuestion: LinearLayout
     private var voiceMessage: String? = null
     private var audioNotice: TextView? = null
     private var answerInput: TextInputEditText? = null
-    private var selectedTones = mutableListOf<Int>()
     private var tablet = false
     private var wideContent = false
     private var contentWidthDp = 0
@@ -217,12 +255,7 @@ class MainActivity : AppCompatActivity() {
         store = StudyStore(this, profileUid)
         connectCloud()
         voice = Pronunciation(this, { error -> voiceMessage = error; audioNotice?.text = error ?: "Китайский голос готов" })
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                if (store.route != "learn") { store.route = "learn"; render() }
-                else { isEnabled = false; onBackPressedDispatcher.onBackPressed() }
-            }
-        })
+        onBackPressedDispatcher.addCallback(this, backCallback)
         render()
         authListener = FirebaseAuth.AuthStateListener { firebase ->
             val nextUid = firebase.currentUser?.uid
@@ -243,10 +276,17 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (::store.isInitialized && store.refreshPractice()) render()
+        scheduleListeningAudio()
         if (auth.currentUser?.isEmailVerified == false) refreshVerification(false)
         else cloud?.sync()
     }
-    override fun onPause() { super.onPause(); if (::store.isInitialized) store.save(); cloud?.sync(); if (::voice.isInitialized) voice.stop() }
+    override fun onPause() {
+        backMotion.reset()
+        pendingListening?.let { window.decorView.removeCallbacks(it) }; pendingListening = null
+        // Hanping briefly opens an external activity. Do not replay again on its return.
+        if (::store.isInitialized && store.audioProvider != "hanping") lastListeningPrompt = null
+        super.onPause(); if (::store.isInitialized) store.save(); cloud?.sync(); if (::voice.isInitialized) voice.stop()
+    }
     override fun onDestroy() {
         authListener?.let { auth.removeAuthStateListener(it) }
         cloud?.close()
@@ -335,10 +375,20 @@ class MainActivity : AppCompatActivity() {
         line.addView(second, LinearLayout.LayoutParams(0, -2, 1f))
         add(line, 12)
     }
+    private fun LinearLayout.quizButtonRow(buttons: List<MaterialButton>) {
+        val line = row()
+        buttons.forEachIndexed { index, control ->
+            control.minHeight = dp(48)
+            control.setPadding(dp(6), dp(4), dp(6), dp(4))
+            line.addView(control, LinearLayout.LayoutParams(0, -2, 1f).apply { if (index > 0) marginStart = dp(6) })
+        }
+        add(line, 4)
+    }
     private fun cardColumns() = if (contentWidthDp >= 640 && resources.configuration.fontScale <= 1.3f) 2 else 1
 
     private fun switchDestination(route: String) {
         if (store.route == route) return
+        backMotion.reset()
         if (store.route == "quiz" || route !in navigationRoutes) {
             store.route = route; render(); return
         }
@@ -376,11 +426,44 @@ class MainActivity : AppCompatActivity() {
             pageScroll.addView(pageHolder)
             pageFrame = sectionFrame(pageScroll)
             sectionList = null; syncStatusLabel = null
+            // ViewPager lays out all its pages in the destination's first frame.
+            // Offscreen pages get only a light shell until explicitly prepared.
+            return captureSection().copy(ready = false)
+        } finally { useSection(active) }
+    }
+
+    private fun prepareSection(route: String) {
+        if (route !in navigationRoutes) return
+        val page = sectionPages.getOrPut(route) { createSection(route) }
+        if (page.ready) return
+        val active = captureSection()
+        val prepared = try {
+            useSection(page)
             renderDestination(route)
             val scroll = pageScroll
             scroll.post { scroll.scrollTo(0, pageScrollPositions[route] ?: 0) }
-            return captureSection()
+            captureSection()
         } finally { useSection(active) }
+        sectionPages[route] = prepared
+        if (store.route == route) useSection(prepared)
+    }
+
+    private fun warmSectionsAfterDraw() {
+        val host = pageHost
+        // Let the destination and its entrance animation finish before preparing
+        // other screens. Each screen gets its own turn, rather than one long layout.
+        fun warmNext() {
+            if (host !== pageHost || store.route == "quiz" || isDestroyed || !host.isAttachedToWindow) return
+            if (sectionScrollState != ViewPager.SCROLL_STATE_IDLE || backMotion.inProgress) {
+                host.postDelayed({ warmNext() }, 64)
+                return
+            }
+            val route = navigationRoutes.sortedBy { kotlin.math.abs(navigationRoutes.indexOf(it) - host.currentItem) }
+                .firstOrNull { sectionPages[it]?.ready == false } ?: return
+            prepareSection(route)
+            host.postDelayed({ warmNext() }, 48)
+        }
+        host.doOnPreDraw { host.postDelayed({ warmNext() }, 260) }
     }
 
     private fun sectionFrame(scroll: ScrollView) = FrameLayout(this).apply {
@@ -397,7 +480,8 @@ class MainActivity : AppCompatActivity() {
         sectionPages.clear()
         sectionPages[initialRoute] = captureSection()
         pageHost.pagingEnabled = initialRoute in navigationRoutes
-        // Four lightweight sections: prepare them once, never while a swipe is settling.
+        // Keep live page shells for swiping, without building three hidden screens
+        // inside the destination's first layout pass.
         pageHost.offscreenPageLimit = navigationRoutes.lastIndex
         pageHost.adapter = object : PagerAdapter() {
             override fun getCount() = if (initialRoute == "quiz") 1 else navigationRoutes.size
@@ -414,6 +498,7 @@ class MainActivity : AppCompatActivity() {
             override fun getItemPosition(item: Any) = if (sectionPages.values.any { it.frame === item }) POSITION_UNCHANGED else POSITION_NONE
         }
         pageHost.setCurrentItem(navigationRoutes.indexOf(initialRoute).coerceAtLeast(0), false)
+        pageHost.preparePageForDrag = { position -> navigationRoutes.getOrNull(position)?.let(::prepareSection) }
         pageHost.addOnPageChangeListener(object : ViewPager.SimpleOnPageChangeListener() {
             override fun onPageScrollStateChanged(state: Int) {
                 sectionScrollState = state
@@ -425,8 +510,11 @@ class MainActivity : AppCompatActivity() {
                 val route = navigationRoutes[position]
                 if (store.route == route) return
                 rememberSectionScroll(store.route)
+                prepareSection(route)
                 sectionPages[route]?.let(::useSection)
                 store.route = route
+                backMotion.reset()
+                backCallback.isEnabled = route != "learn"
                 store.saveScreen()
                 answerInput = null; audioNotice = null
                 bottomNavigation?.let { if (it.selectedItemId != position + 1) it.selectedItemId = position + 1 }
@@ -439,6 +527,7 @@ class MainActivity : AppCompatActivity() {
                 selectionLabel?.text = "${if (route in listOf("learn", "words")) store.selectedStudyWords.size else store.selected.size} слов"
             }
         })
+        if (initialRoute != "quiz") warmSectionsAfterDraw()
     }
 
     private fun refreshAdjacentSections() {
@@ -450,7 +539,7 @@ class MainActivity : AppCompatActivity() {
     private fun postSectionRefresh() {
         val host = pageHost
         host.post {
-            if (host !== pageHost || !sectionRefreshPending || sectionScrollState != ViewPager.SCROLL_STATE_IDLE) return@post
+            if (host !== pageHost || !sectionRefreshPending || sectionScrollState != ViewPager.SCROLL_STATE_IDLE || backMotion.inProgress) return@post
             sectionRefreshPending = false
             // Only Practice and Progress display data changed by a word checkbox.
             val active = store.route
@@ -458,7 +547,9 @@ class MainActivity : AppCompatActivity() {
             sectionPages.remove("learn")
             sectionPages.remove("stats")
             host.adapter?.notifyDataSetChanged()
+            prepareSection(active)
             sectionPages[active]?.let(::useSection)
+            warmSectionsAfterDraw()
         }
     }
 
@@ -488,12 +579,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun render() {
+        backMotion.reset()
+        // At the root Android owns Back, including its back-to-home animation.
+        backCallback.isEnabled = store.route != "learn"
         store.saveScreen()
+        if (store.route != "quiz") { lastListeningPrompt = null; voice.stop() }
         answerInput = null; audioNotice = null; syncStatusLabel = null
-        val windowWidth = resources.configuration.screenWidthDp
-        tablet = windowWidth >= 600
+        if (store.route == "quiz" && "quiz" in sectionPages) {
+            pageFrame.requestFocus()
+            content.removeAllViews()
+            keyboardQuestion.removeAllViews()
+            quizActions.removeAllViews()
+            quizActions.visibility = View.GONE
+            quizDock.scrollTo(0, 0)
+            pageScroll.scrollTo(0, 0)
+            selectionLabel?.text = "${store.studyWords.size} слов"
+            quiz()
+            scheduleListeningAudio()
+            ViewCompat.requestApplyInsets(pageFrame.rootView)
+            return
+        }
+        val config = resources.configuration
+        val windowWidth = config.screenWidthDp
+        tablet = if (store.route == "quiz") StudyLayout.expanded(windowWidth, config.screenHeightDp, config.smallestScreenWidthDp)
+            else windowWidth >= 600
         val railWidth = if (windowWidth >= 1000) 160 else 112
-        contentWidthDp = (windowWidth - (if (tablet) railWidth else 0) - (if (tablet) 48 else 36) - 16).coerceAtLeast(240).coerceAtMost(1040)
+        val showRail = tablet && store.route != "quiz"
+        contentWidthDp = (windowWidth - (if (showRail) railWidth else 0) - (if (tablet) 48 else 36) - 16).coerceAtLeast(240).coerceAtMost(1040)
         wideContent = contentWidthDp >= 720 && resources.configuration.fontScale <= 1.3f
         val root = column().apply { setBackgroundColor(paper) }
         keyboardQuestion = column().apply {
@@ -513,7 +625,10 @@ class MainActivity : AppCompatActivity() {
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             val keyboard = insets.getInsets(WindowInsetsCompat.Type.ime())
-            header.visibility = if (store.route == "quiz" && keyboard.bottom > 0) View.GONE else View.VISIBLE
+            if (!tablet && store.route == "quiz") {
+                v.findViewWithTag<View>("quizSessionBar")?.visibility = if (keyboard.bottom > 0) View.GONE else View.VISIBLE
+            }
+            header.visibility = if (store.route == "quiz" && (!tablet || keyboard.bottom > 0)) View.GONE else View.VISIBLE
             keyboardQuestion.visibility = if (tablet && store.route == "quiz" && keyboard.bottom > 0 && keyboardQuestion.childCount > 0) View.VISIBLE else View.GONE
             v.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, keyboard.bottom))
             WindowInsetsCompat.CONSUMED
@@ -522,7 +637,7 @@ class MainActivity : AppCompatActivity() {
         root.add(View(this).apply { setBackgroundColor(gold) }, height = 2)
         val body = row().apply { gravity = Gravity.TOP }
         railItems.clear()
-        if (tablet) {
+        if (showRail) {
             val rail = column().apply { setPadding(dp(10), dp(20), dp(10), dp(12)); setBackgroundColor(Color.rgb(240, 235, 222)) }
             listOf("learn" to "Учить", "words" to "Слова", "stats" to "Прогресс", "settings" to "Настройки").forEach { (route, title) ->
                 val selected = store.route == route || (route == "learn" && store.route == "quiz")
@@ -546,12 +661,17 @@ class MainActivity : AppCompatActivity() {
                 addView(rail)
             }, LinearLayout.LayoutParams(dp(railWidth), -1))
         }
-        val scroll = ScrollView(this).apply { isFillViewport = true; clipToPadding = false }
+        val scroll = ScrollView(this).apply { isFillViewport = true; clipToPadding = false; tag = "questionScroll" }
         pageScroll = scroll
-        val holder = LinearLayout(this).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; setPadding(dp(if (tablet) 24 else 18), dp(8), dp(if (tablet) 24 else 18), dp(24)) }
+        val phoneQuiz = !tablet && store.route == "quiz"
+        val side = dp(if (tablet) 24 else if (phoneQuiz) 10 else 18)
+        val holder = LinearLayout(this).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            setPadding(side, dp(8), side, dp(if (phoneQuiz) 8 else 24))
+        }
         pageHolder = holder
         content = column()
-        holder.addView(content, LinearLayout.LayoutParams(if (windowWidth - (if (tablet) railWidth else 0) - 48 > 1040) dp(1040) else -1, -2))
+        holder.addView(content, LinearLayout.LayoutParams(if (windowWidth - (if (showRail) railWidth else 0) - 48 > 1040) dp(1040) else -1, -2))
         scroll.addView(holder)
         val workspace = column()
         workspace.add(keyboardQuestion)
@@ -560,12 +680,14 @@ class MainActivity : AppCompatActivity() {
         sectionList = null
         workspace.addView(pageHost, LinearLayout.LayoutParams(-1, 0, 1f))
         quizActions = column().apply {
+            tag = "quizActions"
             visibility = View.GONE
             setPadding(dp(if (tablet) 24 else 18), dp(6), dp(if (tablet) 24 else 18), dp(8))
             setBackgroundColor(Color.WHITE)
             elevation = dp(4).toFloat()
         }
-        workspace.add(quizActions)
+        quizDock = QuizActionDock(this).apply { addView(quizActions); setBackgroundColor(Color.WHITE) }
+        workspace.add(quizDock)
         body.addView(workspace, LinearLayout.LayoutParams(0, -1, 1f))
         val bodyLayer = FrameLayout(this)
         bodyLayer.addView(body, FrameLayout.LayoutParams(-1, -1))
@@ -610,6 +732,7 @@ class MainActivity : AppCompatActivity() {
         ViewCompat.getRootWindowInsets(window.decorView)?.let { ViewCompat.dispatchApplyWindowInsets(root, it) }
         renderDestination()
         installSectionPager()
+        scheduleListeningAudio()
         ViewCompat.requestApplyInsets(root)
     }
     private var activityMonthOffset = 0
@@ -732,8 +855,9 @@ class MainActivity : AppCompatActivity() {
         practicePicker(packControls)
         packControls.add(button("＋ Новый набор") { importHub() }, 10)
         val selectedWords = store.selectedStudyWords
-        val knowledge = store.studyEngine.tasks(selectedWords, false, store.audioEnabled)
-        val writing = store.studyEngine.tasks(selectedWords, true, false)
+        val selectionEngine = store.selectionEngine
+        val knowledge = selectionEngine.tasks(selectedWords, false, store.audioEnabled)
+        val writing = selectionEngine.tasks(selectedWords, true, false)
         val hero = card(jade)
         val heroTop = row()
         heroTop.addView(label("Слов в практике", 15f, Color.rgb(225, 235, 220)), LinearLayout.LayoutParams(0, -2, 1f))
@@ -743,8 +867,8 @@ class MainActivity : AppCompatActivity() {
         }, LinearLayout.LayoutParams(dp(36), dp(36)))
         hero.add(heroTop)
         hero.add(label(selectedWords.size.toString(), if (tablet) 48f else 38f, Color.rgb(255, 214, 107), true), 8)
-        hero.add(label("${knowledge.count { store.studyEngine.peek(it).mastered }} / ${knowledge.size} навыков закреплено", 15f, Color.WHITE), 20)
-        hero.add(progress(knowledge), 12)
+        hero.add(label("${knowledge.count { selectionEngine.peek(it).mastered }} / ${knowledge.size} навыков закреплено", 15f, Color.WHITE), 20)
+        hero.add(progress(knowledge, selectionEngine), 12)
         if (wideContent) {
             val overview = row().apply { gravity = Gravity.TOP }
             overview.addView(packControls, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(18) })
@@ -755,7 +879,12 @@ class MainActivity : AppCompatActivity() {
         short.add(label("Короткое занятие", 21f, ink, true))
         short.add(label("${store.dailyNewWords} новых слов в день. Сначала повторение, затем новые слова. Можно закончить раньше, если всё повторено.", 15f, muted), 8)
         short.twoButtons(button("10 вопросов", true) { startShort(false) }, button("5 минут") { startShort(true) })
-        if (store.shortSession) short.add(button("Продолжить короткое занятие") { store.route = "quiz"; render() }, 8)
+        short.add(button("Трудные слова · ${store.packName}") {
+            val ranked = store.hardReviewTasks()
+            if (ranked.isEmpty()) toast("В этом наборе пока нет трудных заданий для повторения")
+            else chooseHardReview(ranked)
+        }, 8)
+        if (store.shortSession && (!store.sessionFinished || store.feedback != null)) short.add(button("Продолжить короткое занятие") { store.route = "quiz"; render() }, 8)
         content.add(short, 16)
         val extra = card()
         extra.add(label("Хочу заниматься ещё", 21f, ink, true))
@@ -769,11 +898,11 @@ class MainActivity : AppCompatActivity() {
         val write = card()
         write.add(label("Написание", 21f, ink, true))
         write.add(label("Напишите иероглиф по памяти, затем сравните с ответом.", 15f, muted), 8)
-        write.add(label("${writing.count { store.studyEngine.peek(it).mastered }} / ${writing.size} слов закреплено", 14f, jade), 12)
+        write.add(label("${writing.count { selectionEngine.peek(it).mastered }} / ${writing.size} слов закреплено", 14f, jade), 12)
         write.add(button("Практиковать письмо") { start(true) }, 14)
         if (wideContent) { val line = row(); line.gravity = Gravity.TOP; line.addView(learn, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(14) }); line.addView(write, LinearLayout.LayoutParams(0, -2, 1f)); content.add(line, 16) }
         else { content.add(learn, 16); content.add(write, 14) }
-        val due = (knowledge + writing).count { val p = store.studyEngine.peek(it); (p.attempts > 0 || p.mastered) && p.due <= System.currentTimeMillis() }
+        val due = (knowledge + writing).count { val p = selectionEngine.peek(it); (p.attempts > 0 || p.mastered) && p.due <= System.currentTimeMillis() }
         content.add(label(if (due > 0) "$due навыков пора повторить. Откройте режим и начните повторение на сегодня." else "Интервалы подстраиваются под ответы и время между повторениями.", 13f, muted), 20)
         if (selectedWords.isEmpty()) content.add(button("Выбрать слова") { store.route = "words"; render() }, 12)
     }
@@ -783,24 +912,28 @@ class MainActivity : AppCompatActivity() {
         contentDescription = "Закреплено $progress из ${tasks.size} навыков"
     }
     private fun startBeginner() {
-        val beginnerWords = store.studyWords.take(3)
-        val focus = store.studyEngine.tasks(beginnerWords, false, false).filter {
+        val beginnerWords = store.selectedStudyWords.take(3)
+        val focus = store.selectionEngine.tasks(beginnerWords, false, false).filter {
             it.skill in setOf(Skill.CHARACTER_MEANING, Skill.CHARACTER_PINYIN, Skill.CHARACTER_TONE)
         }
         startShort(false, focus)
     }
-    private fun startShort(minutes: Boolean, focus: List<Task>? = null, writing: Boolean = false, scheduled: Boolean = false) {
-        if (focus?.isEmpty() ?: store.selectedStudyWords.isEmpty()) { toast("Выберите хотя бы одно слово"); return }
+    private fun startShort(minutes: Boolean, focus: List<Task>? = null, writing: Boolean = false, scheduled: Boolean = false, packReview: Boolean = false) {
+        if (focus?.isEmpty() ?: store.selectedStudyWords.isEmpty()) {
+            toast("Выберите хотя бы одно слово")
+            store.route = "words"; render(); return
+        }
         store.writing = writing
-        store.beginSession(minutes, focus, scheduled)
+        store.beginSession(minutes, focus, scheduled, packReview)
         store.route = "quiz"; store.nextQuestion(); render()
     }
     private fun startExtra(newWords: Boolean, writing: Boolean) {
         if (!store.beginExtraStudy(newWords, writing)) { render(); return }
         store.route = "quiz"; store.nextQuestion(); render()
     }
-    private fun extraPractice(target: LinearLayout, writing: Boolean = store.writing) {
-        val fresh = store.extraStudyTasks(newWords = true, writing = writing)
+    private fun extraPractice(target: LinearLayout, writing: Boolean = store.writing, afterSession: Boolean = false) {
+        val options = store.extraStudyOptions(writing)
+        val fresh = options.fresh
         if (fresh.isNotEmpty()) {
             val count = fresh.map { it.wordId }.distinct().size
             val words = when (count) {
@@ -812,9 +945,9 @@ class MainActivity : AppCompatActivity() {
                 startExtra(newWords = true, writing = writing)
             }, 12)
         }
-        if (store.extraStudyTasks(newWords = false, writing = writing).isNotEmpty()) {
+        if (options.familiar.isNotEmpty()) {
             target.add(label("Знакомые слова доступны и до срока повторения. Ответы учитываются в прогрессе.", 13f, muted), 8)
-            target.add(button("Практиковать знакомые слова") {
+            target.add(button(if (afterSession && options.familiar.size >= 10) "Ещё 10 вопросов" else "Практиковать знакомые слова") {
                 startExtra(newWords = false, writing = writing)
             }, 8)
         }
@@ -828,11 +961,14 @@ class MainActivity : AppCompatActivity() {
         store.studyEngine.dueSchedule(store.tasks()).values.filter { it > System.currentTimeMillis() }.minOrNull()?.let {
             content.add(label("Ближайшее повторение: ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(it))}", 15f, jade), 12)
         }
-        content.add(button("Ещё 10 вопросов", true) {
-            val focus = store.session.optJSONArray("tasks")?.let { json -> (0 until json.length()).map { json.getString(it) }.toSet() }
-            startShort(false, focus?.let { keys -> store.tasks().filter { it.key in keys } }, store.writing, store.sessionUsesSchedule)
-        }, 12)
-        extraPractice(content)
+        if (store.packReview) {
+            val missed = store.missedReviewTasks()
+            if (missed.isNotEmpty()) content.add(button("Повторить ошибки (${missed.size})", true) {
+                startShort(false, missed, packReview = true)
+            }, 12)
+        }
+        extraPractice(content, afterSession = true)
+        if (store.selectedStudyWords.isEmpty()) content.add(button("Выбрать слова") { store.route = "words"; render() }, 12)
         content.add(button("Трудные слова") { store.leaveSession(); store.route = "stats"; render() }, 8)
         content.add(button("К обзору") { store.leaveSession(); store.route = "learn"; render() }, 8)
     }
@@ -865,29 +1001,43 @@ class MainActivity : AppCompatActivity() {
         quizActions.visibility = View.VISIBLE
         val word = store.studyWords.first { it.id == task.wordId }
         if (store.needsPreview(word) && store.feedback == null) {
-            heading("Новое слово", "Познакомьтесь со словом перед первым вопросом.")
+            if (!tablet) content.add(label("Новое слово", 20f, jade, true)) else heading("Новое слово", "Познакомьтесь со словом перед первым вопросом.")
             val preview = card()
             preview.add(label(word.writtenForms.joinToString(" / "), 48f, jade, true))
             preview.add(label("${word.pinyin} · ${word.numbered}", 24f), 12)
             preview.add(label(word.meanings.joinToString(" / "), 20f), 12)
-            preview.add(label(word.hint.ifBlank { "Произнесите слово и свяжите его написание со значением." }, 16f, muted), 12)
-            preview.add(button("▶ Произношение") { play(word) }, 12)
-            preview.add(button("Порядок черт") { strokeOrder(word) }, 8)
+            val pronounce = button("▶ Произношение") { play(word) }
+            val strokes = button("Порядок черт") { strokeOrder(word) }
+            quizActions.quizButtonRow(listOf(pronounce, strokes))
             content.add(preview, 16)
+            content.addSpeechExample(word)
             quizActions.add(button("Запомнил — к вопросам", true) { store.introduce(word); render() }, 8)
+            quizFooter(word)
             return
         }
-        if (store.shortSession) {
-            content.add(label(if (store.session.optInt("limit") > 0) "Занятие: ${store.sessionCount} / 10 ответов" else "Занятие: 5 минут · ${store.sessionCount} ответов. Завершится после текущего вопроса.", 16f, jade, true), 8)
-            content.add(button("Завершить занятие") { store.endSession(); render() }, 8)
+        if (!tablet && store.shortSession) {
+            val limit = store.session.optInt("limit")
+            val count = if (limit > 0) "Ответов: ${store.sessionCount} из $limit" else "5 минут · Ответов: ${store.sessionCount}"
+            val bar = row().apply { tag = "quizSessionBar" }
+            bar.addView(label(count, 14f, jade, true), LinearLayout.LayoutParams(0, -2, 1f))
+            bar.addView(button("Завершить занятие") { store.endSession(); render() }.apply {
+                textSize = 14f; minHeight = dp(48)
+            })
+            content.add(bar)
         }
-        val mastery = tasks.count { store.studyEngine.peek(it).mastered }
-        val top = row()
-        top.addView(label(if (task.skill == Skill.WRITING) "НАПИСАНИЕ" else "ЗНАНИЕ", 12f, jade, true), LinearLayout.LayoutParams(0, -2, 1f))
-        top.addView(label("$mastery / ${tasks.size}", 14f, muted))
-        content.add(top, 6); content.add(progress(tasks), 12)
-        content.add(label("Ошибок: ${tasks.sumOf { store.studyEngine.peek(it).errors }} · ${task.skill.title}", 13f, muted), 12)
-        val question = card()
+        if (tablet) {
+            if (store.shortSession) {
+                content.add(label(if (store.session.optInt("limit") > 0) "Ответов: ${store.sessionCount} из ${store.session.optInt("limit")}" else "Занятие: 5 минут · ${store.sessionCount} ответов. Завершится после текущего вопроса.", 16f, jade, true), 8)
+                content.add(button("Завершить занятие") { store.endSession(); render() }, 8)
+            }
+            val mastery = tasks.count { store.studyEngine.peek(it).mastered }
+            val top = row()
+            top.addView(label(if (task.skill == Skill.WRITING) "НАПИСАНИЕ" else "ЗНАНИЕ", 12f, jade, true), LinearLayout.LayoutParams(0, -2, 1f))
+            top.addView(label("$mastery / ${tasks.size}", 14f, muted))
+            content.add(top, 6); content.add(progress(tasks), 12)
+            content.add(label("Ошибок: ${tasks.sumOf { store.studyEngine.peek(it).errors }} · ${task.skill.title}", 13f, muted), 12)
+        }
+        val question = if (tablet) card() else column()
         val answerKind = when (task.skill) {
             Skill.CHARACTER_MEANING, Skill.PINYIN_MEANING, Skill.AUDIO_MEANING -> "Ответ: перевод на русский"
             Skill.CHARACTER_PINYIN, Skill.MEANING_PINYIN -> "Ответ: пиньинь с тонами"
@@ -895,14 +1045,15 @@ class MainActivity : AppCompatActivity() {
             Skill.WRITING -> "Ответ: иероглиф от руки"
             else -> "Ответ: выберите иероглиф"
         }
-        question.add(label(answerKind, 14f, red, true).apply {
-            background = bg(blush, 10); setPadding(dp(12), dp(10), dp(12), dp(10))
-        })
-        question.add(label(task.skill.instruction, 20f, ink, true), 14)
-        if (store.studyEngine.peek(task).mastered && store.feedback == null) question.add(label("Плановое повторение", 12f, jade), 6)
+        if (tablet) {
+            question.add(label(answerKind, 14f, red, true).apply {
+                background = bg(blush, 10); setPadding(dp(12), dp(10), dp(12), dp(10))
+            })
+        }
+        if (tablet || store.feedback == null) question.add(label(task.skill.instruction, if (tablet) 20f else 16f, ink, true), if (tablet) 14 else 4)
+        if (tablet && store.studyEngine.peek(task).mastered && store.feedback == null) question.add(label("Плановое повторение", 12f, jade), 6)
         val audio = task.skill in listOf(Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER)
-        // Keep the actual question outside the answer scroller while the tablet IME is open.
-        if (store.feedback == null) {
+        if (tablet && store.feedback == null) {
             val prompt = when (task.skill) {
                 Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER -> "Послушайте запись"
                 Skill.MEANING_PINYIN, Skill.MEANING_CHARACTER, Skill.WRITING -> word.meanings.first()
@@ -912,66 +1063,102 @@ class MainActivity : AppCompatActivity() {
             val context = row()
             val text = column()
             text.add(label(task.skill.instruction, 13f, muted))
-            text.add(label(prompt, 26f, jade, true).apply { contentDescription = "Текущий вопрос" }, 2)
+            text.add(label(prompt, 26f, jade, true).apply { contentDescription = "Текущий вопрос: $prompt" }, 2)
             context.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
-            if (audio) context.addView(button("▶ Слушать") { play(word) }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(12) })
             keyboardQuestion.add(context)
         }
-        if (audio) {
-            question.add(label("♪", 64f, jade).apply { gravity = Gravity.CENTER; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }, 14)
-            question.add(button("▶  Послушать", true) { play(word) }, 8)
-            if (store.audioProvider == "hanping") question.add(button("Нет звука? Голос устройства") { useDeviceVoice(word) }, 8)
-            question.add(label("Повторяйте запись столько раз, сколько нужно.", 13f, muted), 10)
+        if (audio && (tablet || store.feedback == null)) {
+            if (tablet) question.add(label("♪", 64f, jade).apply { gravity = Gravity.CENTER; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }, 14)
+            if (store.feedback == null) quizActions.add(button("▶  Послушать", true) { play(word) }, 4)
+            if (tablet) question.add(label("Повторяйте запись столько раз, сколько нужно.", 13f, muted), 10)
             audioNotice = label(if (store.audioProvider == "hanping") "Звук воспроизводит Hanping" else voiceMessage ?: "Используется китайский голос устройства", 12f, muted)
             question.add(audioNotice!!, 8)
-        } else {
+        } else if (!audio && (tablet || store.feedback == null)) {
             val prompt = when (task.skill) {
                 Skill.MEANING_PINYIN, Skill.MEANING_CHARACTER, Skill.WRITING -> word.meanings.first()
                 Skill.PINYIN_MEANING, Skill.PINYIN_CHARACTER -> word.pinyin
                 else -> word.writtenForms.joinToString(" / ")
             }
             val isHanzi = task.skill in listOf(Skill.CHARACTER_MEANING, Skill.CHARACTER_PINYIN, Skill.CHARACTER_TONE)
-            question.add(label(prompt, if (isHanzi) 64f else 32f, jade, isHanzi).apply { gravity = Gravity.CENTER; setPadding(0, dp(24), 0, dp(24)) }, 10)
+            question.add(label(prompt, if (isHanzi && tablet) 64f else if (isHanzi) 46f else 28f, jade, isHanzi).apply {
+                gravity = Gravity.CENTER
+                if (!tablet) contentDescription = "Текущий вопрос: $prompt"
+                val space = dp(if (tablet) 24 else 4)
+                setPadding(0, space, 0, space)
+            }, if (tablet) 10 else 4)
         }
-        val response = if (wideContent) card() else question
+        val splitQuestion = tablet && wideContent && (task.skill == Skill.WRITING || store.feedback != null)
+        val response = if (splitQuestion) card() else question
         if (store.feedback == null) {
             when (task.skill) {
                 Skill.MEANING_CHARACTER, Skill.PINYIN_CHARACTER, Skill.AUDIO_CHARACTER -> {
-                    store.choices.chunked(2).forEach { pair ->
+                    val longChoices = store.choices.any { it.codePointCount(0, it.length) > 8 }
+                    val columns = if (longChoices) 1 else 2
+                    store.choices.chunked(columns).forEach { pair ->
                         val line = row()
-                        pair.forEachIndexed { index, option -> line.addView(button(option) { store.draft = option; submit(word.acceptsForm(option)) }.apply { textSize = 30f; minHeight = dp(76) }, LinearLayout.LayoutParams(0, -2, 1f).apply { if (index == 0) marginEnd = dp(8) }) }
-                        if (pair.size == 1) line.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-                        response.add(line, 10)
+                        pair.forEachIndexed { index, option -> line.addView(button(option) { store.draft = option; submit(word.acceptsForm(option)) }.apply { textSize = if (longChoices) 22f else 30f; minHeight = dp(if (tablet) 76 else 52) }, LinearLayout.LayoutParams(0, -2, 1f).apply { if (index < pair.lastIndex) marginEnd = dp(8) }) }
+                        if (pair.size == 1 && columns == 2) line.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+                        quizActions.add(line, 6)
                     }
                 }
                 Skill.CHARACTER_TONE -> {
-                    selectedTones = store.toneDraft.toMutableList()
                     val tones = Answers.tones(word)
-                    response.add(label("Слог ${selectedTones.size + 1} из ${tones.size}${if (selectedTones.isNotEmpty()) " · Выбрано: ${selectedTones.joinToString(" → ")}" else ""}", 14f, muted), 8)
+                    val picker = quizActions
+                    val status = label("", 14f, muted)
+                    val history = label("", 14f, jade).apply {
+                        setSingleLine(true)
+                        ellipsize = android.text.TextUtils.TruncateAt.START
+                        gravity = Gravity.END
+                    }
+                    val summary = row()
+                    summary.addView(status)
+                    summary.addView(history, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(6) })
+                    picker.add(summary, 4)
+                    lateinit var reset: MaterialButton
+                    fun updateTones() {
+                        val draft = store.toneDraft
+                        status.text = "Слог ${draft.size + 1} из ${tones.size}"
+                        history.text = draft.joinToString(" → ")
+                        reset.isEnabled = draft.isNotEmpty()
+                    }
                     val labels = listOf("1   mā  · ровный", "2   má  · восходящий", "3   mǎ  · нисходяще-восходящий", "4   mà  · нисходящий", "5   ma  · нейтральный")
-                    labels.forEachIndexed { index, title -> response.add(button(title) {
-                        store.toneDraft.add(index + 1)
-                        if (store.toneDraft.size == tones.size) submit(store.toneDraft == tones) else { store.save(); render() }
-                    }, 8) }
-                    if (selectedTones.isNotEmpty()) response.add(button("Выбрать тоны заново") { store.toneDraft.clear(); render() }, 8)
+                    if (tablet) question.add(label(labels.joinToString("\n"), 14f, muted), 8)
+                    val controls = labels.mapIndexed { index, title ->
+                        val caption = title.substringBefore("  ·").replace("   ", " ")
+                        button(caption) {
+                            store.toneDraft.add(index + 1)
+                            if (store.toneDraft.size == tones.size) submit(store.toneDraft == tones)
+                            else { store.saveScreen(); updateTones() }
+                        }.apply {
+                            contentDescription = title
+                            androidx.appcompat.widget.TooltipCompat.setTooltipText(this, title)
+                        }
+                    }
+                    reset = button(if (tablet) "Выбрать тоны заново" else "Заново") {
+                        store.toneDraft.clear(); store.saveScreen(); updateTones()
+                    }.apply { contentDescription = "Выбрать тоны заново" }
+                    val columns = StudyLayout.toneColumns(contentWidthDp, resources.configuration.fontScale)
+                    controls.chunked(columns).forEach { picker.quizButtonRow(it) }
+                    picker.quizButtonRow(listOf(reset, button("Не знаю") { submit(false) }))
+                    updateTones()
                 }
                 Skill.WRITING -> {
                     val pad = WritingGrid(this, word.hanzi.codePointCount(0, word.hanzi.length), store.strokes) { store.strokes = it; store.saveDraft() }
-                    response.add(pad, 12)
-                    response.add(button("Очистить поле") { pad.clear() }, 8)
+                    if (!tablet && store.revealed) response.add(label("${word.writtenForms.joinToString(" / ")}   ${word.pinyin}", 32f, jade, true), 6)
+                    response.add(pad, if (tablet) 12 else 4)
+                    quizActions.add(button("Очистить поле") { pad.clear() }, 4)
                     response.add(label("Вспомните также количество и порядок черт. Оценка самостоятельная: приложение не проверяет почерк или порядок черт.", 13f, muted), 10)
                     if (!store.revealed) quizActions.add(button("Показать ответ", true) { store.revealed = true; render() }, 14)
                     else {
-                        response.add(label("${word.writtenForms.joinToString(" / ")}   ${word.pinyin}", 38f, jade), 18)
+                        if (tablet) response.add(label("${word.writtenForms.joinToString(" / ")}   ${word.pinyin}", 38f, jade), 18)
                         if (word.writtenForms.size > 1) response.add(label("Подходит любой из указанных вариантов написания.", 14f, muted), 6)
                         response.add(label(word.hint, 15f, muted), 6)
-                        response.add(button("Порядок черт") { strokeOrder(word) }, 8)
-                        quizActions.twoButtons(button("Не помню") { submit(false) }, button("Помню", true) { submit(true) })
+                        quizActions.quizButtonRow(listOf(button("Не помню") { submit(false) }, button("Помню", true) { submit(true) }))
                     }
                 }
                 else -> {
                     val isPinyin = task.skill in listOf(Skill.CHARACTER_PINYIN, Skill.MEANING_PINYIN)
-                    val input = field(if (isPinyin) "Пиньинь с тонами" else "Русский перевод", store.draft, response)
+                    val input = field(if (isPinyin) "Пиньинь с тонами" else "Русский перевод", store.draft, quizActions)
                     answerInput = input
                     input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                     input.imeOptions = EditorInfo.IME_ACTION_DONE
@@ -979,14 +1166,21 @@ class MainActivity : AppCompatActivity() {
                     fun check() { if (input.text.toString().isBlank()) { input.error = "Введите ответ"; return }; submit(if (isPinyin) Answers.pinyinMatches(input.text.toString(), word.numbered) else Answers.meaningMatches(input.text.toString(), word)) }
                     input.setOnEditorActionListener { _, action, _ -> if (action == EditorInfo.IME_ACTION_DONE) { check(); true } else false }
                     if (isPinyin) response.add(label("Можно использовать знаки тона или цифры 1–5. Для ü подходят v и u:.", 13f, muted), 8)
-                    quizActions.add(button("Проверить", true) { check() }, 4)
+                    val verify = button("Проверить", true) { check() }
+                    quizActions.quizButtonRow(listOf(button("Не знаю") { submit(false) }, verify))
                 }
             }
-            if (task.skill != Skill.WRITING) quizActions.add(button("Не знаю — показать ответ") { submit(false) }, 6)
+            if (task.skill in StudyStore.characterSkills) quizActions.add(button("Не знаю — показать ответ") { submit(false) }, 6)
         } else {
             val correct = store.feedback == true
             val result = card(if (store.answerIgnored) paper else if (correct) pale else Color.rgb(253, 236, 228))
             result.add(label(if (store.answerIgnored) "Ответ не учтён" else if (correct) "✓  Верно" else "Неверно", 22f, if (store.answerIgnored) ink else if (correct) jade else red, true))
+            fun showSolution() {
+                result.add(label(word.writtenForms.joinToString(" / "), 48f, jade), 12)
+                result.add(label("${word.pinyin}  ·  ${Answers.tones(word).joinToString(" + ")}", 20f, ink, true), 4)
+                result.add(label(word.meanings.joinToString(" / "), 18f), 8)
+            }
+            if (!tablet) showSolution()
             if (store.draft.isNotBlank()) result.add(label("Ваш ответ: ${store.draft}", 14f, muted), 8)
             if (store.toneDraft.isNotEmpty()) result.add(label("Ваши тоны: ${store.toneDraft.joinToString(" → ")}", 14f, muted), 8)
             if (!correct && !store.answerIgnored) {
@@ -1000,54 +1194,147 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-            result.add(label(word.writtenForms.joinToString(" / "), 48f, jade), 12)
-            result.add(label("${word.pinyin}  ·  ${Answers.tones(word).joinToString(" + ")}", 20f, ink, true), 4)
-            result.add(label(word.meanings.joinToString(" / "), 18f), 8)
-            if (word.example.isNotBlank()) {
-                result.add(label("Пример: ${word.example}", 22f, jade), 16)
-                result.add(label(word.examplePinyin, 17f), 6)
-                result.add(label(word.exampleTranslation, 17f), 6)
-                result.add(button("▶  Прослушать предложение") {
-                    voice.play(word.copy(hanzi = word.example), "system", store.slowAudio)?.let { message("Звук недоступен", it) }
-                }, 8)
-            }
+            if (tablet) showSolution()
             if (!correct && !store.answerIgnored && task.skill in StudyStore.characterSkills && store.draft in store.choices) {
                 result.add(label("Сравните: ${word.hanzi} ≠ ${store.draft}", 24f, jade), 12)
                 store.studyWords.firstOrNull { it.acceptsForm(store.draft) }?.let { other ->
                     result.add(label("${other.hanzi} · ${other.pinyin} · ${other.meanings.joinToString(" / ")}", 17f), 6)
                 }
             }
-            if (word.hint.isNotBlank()) result.add(label(word.hint, 15f, muted), 12)
             result.add(label(if (store.answerIgnored) "Попытка отменена. Ошибки, серия ответов и срок повторения восстановлены." else "Следующее повторение: ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(store.studyEngine.peek(task).due))}.", 13f, if (store.answerIgnored) muted else if (correct) jade else red), 12)
-            response.add(result, 14)
+            response.add(result, if (tablet) 14 else 0)
+            response.addSpeechExample(word)
             if (!store.answerIgnored && store.canIgnoreAnswer && !correct && store.draft.isNotBlank() && task.skill in listOf(Skill.CHARACTER_MEANING, Skill.PINYIN_MEANING, Skill.AUDIO_MEANING)) {
-                response.add(button("Засчитать мой ответ") { acceptSynonym(word, task) }, 10)
+                quizActions.add(button("Засчитать мой ответ") { acceptSynonym(word, task) }, 4)
             }
-            if (store.canIgnoreAnswer) quizActions.add(button("Ответил случайно — не учитывать") {
+            val undoTitle = "Ответил случайно — не учитывать"
+            val undo = if (store.canIgnoreAnswer) button(if (tablet) undoTitle else "Отменить ответ") {
                 voice.stop()
                 store.ignoreAnswer(); render()
-            }, 10)
-            response.twoButtons(button("▶  Произношение") { play(word) }, button("Словарь") { dictionary(word) })
-            response.add(button("Порядок черт") { strokeOrder(word) }, 8)
-            if (store.audioProvider == "hanping") response.add(button("Нет звука? Голос устройства") { useDeviceVoice(word) }, 8)
-            quizActions.add(button("Дальше", true) { voice.stop(); store.nextQuestion(); render() }, 6)
+            }.apply { contentDescription = undoTitle } else null
+            val next = button("Дальше", true) { voice.stop(); store.nextQuestion(); render() }
+            quizActions.quizButtonRow(listOfNotNull(undo, next))
         }
-        if (wideContent) {
+        if (splitQuestion) {
             val panels = row().apply { gravity = Gravity.TOP }
             panels.addView(question, LinearLayout.LayoutParams(0, -2, 0.9f).apply { marginEnd = dp(18) })
             panels.addView(response, LinearLayout.LayoutParams(0, -2, 1.1f))
             content.add(panels, 18)
-        } else content.add(question, 18)
-        content.add(button("К обзору") { store.route = "learn"; render() }, 14)
+        } else content.add(question, if (tablet) 18 else 4)
+        quizFooter(word)
+    }
+    private fun quizFooter(word: Word) {
+        val overview = button("К обзору") { store.route = "learn"; render() }
+        val toolsAvailable = store.shortSession || store.needsPreview(word) || store.feedback != null ||
+            store.revealed || store.current?.skill in setOf(Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER)
+        quizActions.quizButtonRow(if (toolsAvailable) listOf(overview, button("Ещё") { quizTools(word) }) else listOf(overview))
+    }
+
+    private fun quizTools(word: Word) {
+        val sheet = BottomSheetDialog(this)
+        val tools = column().apply { setPadding(dp(18), dp(12), dp(18), dp(24)) }
+        fun action(title: String, block: () -> Unit) { tools.add(button(title) { sheet.dismiss(); block() }, 6) }
+        val answerVisible = store.feedback != null || store.needsPreview(word) || store.revealed
+        if (answerVisible || store.current?.skill in setOf(Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER)) {
+            action("▶  Произношение") { play(word) }
+            if (store.audioProvider == "hanping") action("Нет звука? Голос устройства") { useDeviceVoice(word) }
+        }
+        if (answerVisible) {
+            action("Порядок черт") { strokeOrder(word) }
+            action("Словарь") { dictionary(word) }
+            tools.addSpeechExample(word)
+        }
+        if (store.shortSession) action("Завершить занятие") { voice.stop(); store.endSession(); render() }
+        action("Закрыть меню") { }
+        sheet.setContentView(androidx.core.widget.NestedScrollView(this).apply { addView(tools) })
+        sheet.behavior.maxHeight = resources.displayMetrics.heightPixels * 4 / 5
+        sheet.show()
+        sheet.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
+    }
+
+    private fun scheduleListeningAudio() {
+        pendingListening?.let { window.decorView.removeCallbacks(it) }; pendingListening = null
+        if (!::store.isInitialized || !::voice.isInitialized) return
+        val task = store.current
+        val word = store.studyWords.firstOrNull { it.id == task?.wordId }
+        if (store.route != "quiz" || store.feedback != null || store.sessionFinished || word == null ||
+            task?.skill !in setOf(Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER) || store.needsPreview(word)) {
+            lastListeningPrompt = null
+            return
+        }
+        val key = "${System.identityHashCode(store)}:${store.activePackId}:${task?.key}:${store.studyEngine.step}"
+        if (lastListeningPrompt == key) return
+        pendingListening = Runnable {
+            pendingListening = null
+            if (!lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED) ||
+                store.route != "quiz" || store.current != task || store.feedback != null) return@Runnable
+            lastListeningPrompt = key
+            // Autoplay reports a failure inline; the replay button remains available.
+            voice.play(word, store.audioProvider, store.slowAudio)?.let {
+                voiceMessage = it; audioNotice?.text = it
+            }
+        }.also { window.decorView.post(it) }
     }
     private fun submit(correct: Boolean) {
         val task = store.current ?: return
         if (store.feedback != null) return
+        voice.stop()
         (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(answerInput?.windowToken, 0)
         store.recordAnswer(correct)
         render()
         if (store.speakAfterAnswer) store.studyWords.firstOrNull { it.id == task.wordId }?.let { play(it) }
     }
+    private val starterExamples by lazy { StudyStore.decodeWords(StudyStore.seedJson).associateBy(SharedWords::identity) }
+
+    private fun LinearLayout.addSpeechExample(word: Word) {
+        val source = if (word.example.isBlank()) starterExamples[SharedWords.identity(word)] ?: word else word
+        if (source.example.isBlank() && word.hint.isBlank()) return
+        val panel = card()
+        add(panel, 12)
+        if (source.example.isBlank()) {
+            panel.add(label("Пояснение к слову", 18f, jade, true))
+            panel.add(label(word.hint), 8)
+            return
+        }
+
+        panel.add(label("Слово в речи", 18f, jade, true))
+        val sentence = SpannableString(source.example)
+        // Match longer forms first when an alternative contains another written form.
+        val forms = word.writtenForms.sortedByDescending { it.length }
+        if (forms.isNotEmpty()) {
+            val pattern = Regex(forms.joinToString("|") { Regex.escape(it) })
+            for (match in pattern.findAll(source.example)) {
+                val start = match.range.first
+                val end = match.range.last + 1
+                sentence.setSpan(BackgroundColorSpan(pale), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                sentence.setSpan(StyleSpan(Typeface.BOLD), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+        }
+        panel.add(label("", 28f).apply { text = sentence }, 12)
+        panel.add(button("▶  Слушать фразу") {
+            voice.play(word.copy(hanzi = source.example), "system", store.slowAudio)?.let { message("Звук недоступен", it) }
+        }, 12)
+        panel.add(label("Произнесите фразу и попробуйте её перевести.", 15f, muted), 12)
+
+        val details = column().apply {
+            visibility = View.GONE
+            if (source.examplePinyin.isNotBlank()) add(label(source.examplePinyin, 18f, jade))
+            if (source.exampleTranslation.isNotBlank()) add(label(source.exampleTranslation, 18f), 6)
+            if (word.hint.isNotBlank()) {
+                add(label("Пояснение к слову", 15f, jade, true), 12)
+                add(label(word.hint), 4)
+            }
+        }
+        val reveal = button("Показать разбор") { }
+        reveal.setOnClickListener {
+            val opening = details.visibility == View.GONE
+            details.visibility = if (opening) View.VISIBLE else View.GONE
+            reveal.text = if (opening) "Скрыть разбор" else "Показать разбор"
+        }
+        panel.add(reveal, 8)
+        panel.add(details, 12)
+    }
+
     private fun acceptSynonym(word: Word, task: Task) {
         MaterialAlertDialogBuilder(this).setTitle("Добавить синоним?")
             .setMessage("«${store.draft}» будет приниматься как перевод «${word.hanzi}» во всех наборах с такой же карточкой. Этот ответ станет верным, а ошибочная отметка будет отменена.")
@@ -1167,10 +1454,18 @@ class MainActivity : AppCompatActivity() {
         parent.add(button("Наборы для практики: ${store.practicePackIds.size} ▾") {
             val names = store.visiblePackNames
             val chosen = store.practicePackIds.toMutableSet()
-            val allFolders = listOf("").filter { names.any { pack -> store.packFolder(pack.first).isEmpty() } } +
-                FolderPaths.all(names.map { store.packFolder(it.first) })
-            val expanded = mutableSetOf("").apply {
-                names.filter { it.first in chosen }.forEach { addAll(FolderPaths.ancestors(store.packFolder(it.first)) + store.packFolder(it.first)) }
+            val packsByFolder = names.groupBy { store.packFolder(it.first) }
+            val allFolders = listOf("").filter { it in packsByFolder } + FolderPaths.all(packsByFolder.keys.toList())
+            val totals = mutableMapOf<String, Int>()
+            val selectedCounts = mutableMapOf<String, Int>()
+            val expanded = mutableSetOf("")
+            for ((path, members) in packsByFolder) {
+                val count = members.count { it.first in chosen }
+                for (folder in FolderPaths.ancestors(path) + path) {
+                    totals[folder] = totals.getOrDefault(folder, 0) + members.size
+                    selectedCounts[folder] = selectedCounts.getOrDefault(folder, 0) + count
+                    if (count > 0) expanded.add(folder)
+                }
             }
             var folders = emptyList<String>()
             var groups = emptyList<List<Pair<String, String>>>()
@@ -1182,7 +1477,7 @@ class MainActivity : AppCompatActivity() {
             lateinit var adapter: BaseExpandableListAdapter
             fun refresh() {
                 folders = allFolders.filter { FolderPaths.ancestors(it).all(expanded::contains) }
-                groups = folders.map { folder -> names.filter { store.packFolder(it.first) == folder } }
+                groups = folders.map { packsByFolder[it].orEmpty() }
                 adapter.notifyDataSetChanged()
                 folders.indices.forEach { if (folders[it] in expanded) tree.expandGroup(it) else tree.collapseGroup(it) }
             }
@@ -1198,9 +1493,8 @@ class MainActivity : AppCompatActivity() {
                 override fun getGroupView(groupPosition: Int, isExpanded: Boolean, convertView: View?, parent: ViewGroup): View {
                     val path = folders[groupPosition]
                     val title = FolderPaths.title(path).ifEmpty { "Без папки" }
-                    val nested = names.filter { FolderPaths.contains(path, store.packFolder(it.first)) }
-                    val total = nested.size
-                    val selected = nested.count { it.first in chosen }
+                    val total = totals.getValue(path)
+                    val selected = selectedCounts.getValue(path)
                     return label("${if (isExpanded) "▾" else "▸"} $title · $selected/$total", 17f, jade, true).apply {
                         setPadding(dp(16 + FolderPaths.depth(path) * 16), dp(14), dp(16), dp(14))
                         minimumHeight = dp(56)
@@ -1219,6 +1513,10 @@ class MainActivity : AppCompatActivity() {
                         isChecked = id in chosen
                         setOnCheckedChangeListener { _, checked ->
                             if (checked) chosen.add(id) else chosen.remove(id)
+                            val path = store.packFolder(id)
+                            for (folder in FolderPaths.ancestors(path) + path) {
+                                selectedCounts[folder] = selectedCounts.getValue(folder) + if (checked) 1 else -1
+                            }
                             notifyDataSetChanged()
                         }
                     }
@@ -1517,7 +1815,7 @@ class MainActivity : AppCompatActivity() {
                         LibraryWordCard(onSelectionChanged = { checked ->
                             selectedCount += if (checked) 1 else -1
                             selectedLabel.text = selectionText()
-                            selectionLabel?.text = "${store.studyWords.size} слов"
+                            selectionLabel?.text = "${store.selectedStudyWords.size} слов"
                         }, onKnowledgeChanged = { word, category, checked ->
                             val identity = SharedWords.identity(word)
                             entries.filter { SharedWords.identity(it.word) == identity }.forEach { entry ->
@@ -1639,7 +1937,8 @@ class MainActivity : AppCompatActivity() {
         }
         content.add(combined, 16)
         packPicker()
-        val all = store.engine.tasks(store.words, false, store.audioEnabled)
+        val knowledgeTasks = store.engine.tasks(store.words, false, store.audioEnabled)
+        val all = ListeningAvailability.filter(knowledgeTasks, store.words, store.audioProvider)
         val writing = store.engine.tasks(store.words, true, false)
         val summary = card()
         summary.add(label("Знание: ${all.count { store.engine.peek(it).mastered }} / ${all.size}", 20f, jade, true))
@@ -1649,47 +1948,33 @@ class MainActivity : AppCompatActivity() {
         summary.add(label("В этом обзоре — все слова текущего набора. Обучение использует только выбранные слова.", 13f, muted), 14)
         content.add(summary, 20)
         content.add(label("Что сложнее запомнить", 22f, ink, true), 24)
-        content.add(label("Сначала — незакреплённые задания. Чем чаще ошибки и короче серия верных ответов, тем выше задание в списке.", 13f, muted), 8)
+        content.add(label("Здесь задания с ошибками. Чем чаще вы ошибаетесь и чем короче серия верных ответов, тем выше задание в списке. Закреплённые задания исчезают из списка.", 13f, muted), 8)
         val wordsById = store.words.associateBy { it.id }
+        val validKeys = all.map { it.key }.toSet()
         val pairs = store.engine.progress.entries.flatMap { (key, state) ->
             val word = wordsById[key.substringBefore(':')]
-            state.confusions.entries.filter { word != null && !word.acceptsForm(it.key) }.map { Triple(word!!, it.key, it.value) }
+            state.confusions.entries.filter { word != null && key in validKeys && !word.acceptsForm(it.key) }.map { Triple(word!!, it.key, it.value) }
         }.sortedByDescending { it.third }
         if (pairs.isNotEmpty()) {
             content.add(label("Часто путаю", 22f, ink, true), 16)
             pairs.take(20).forEach { (word, wrong, count) -> content.add(label("${word.hanzi} ↔ $wrong · $count ошибок", 17f), 6) }
             content.add(button("Практиковать похожие знаки") {
-                val focus = store.engine.progress.filter { (key, p) -> p.confusions.isNotEmpty() && key.substringBefore(':') in wordsById }
-                    .keys.mapNotNull { key -> Skill.entries.find { it.name == key.substringAfter(':') }?.let { Task(key.substringBefore(':'), it) } }
+                val focus = all.filter { task -> store.engine.peek(task).confusions.keys.any { !wordsById.getValue(task.wordId).acceptsForm(it) } }
                 val partners = focus.flatMap { task ->
                     val wrong = store.engine.peek(task).confusions.keys
                     store.words.filter { word -> word.writtenForms.any { it in wrong } }.map { Task(it.id, task.skill) }
                 }
-                store.choosePracticePacks(setOf(store.activePackId))
-                startShort(false, (focus + partners).distinct())
+                val valid = (all + writing).toSet()
+                startShort(false, (focus + partners).distinct().filter { it in valid }, packReview = true)
             }, 12)
         }
-        val problematic = RecallDifficulty.rank(all + writing, store.engine.progress)
+        val problematic = store.hardReviewTasks(all + writing)
         if (problematic.isNotEmpty()) content.add(button("Практиковать трудные слова", true) {
-            val groups = listOf("Все трудные задания", "Тоны", "Аудирование", "Значение", "Написание")
-            MaterialAlertDialogBuilder(this).setTitle("Что практиковать?").setItems(groups.toTypedArray()) { _, index ->
-                val skills = when (index) {
-                    1 -> setOf(Skill.CHARACTER_TONE, Skill.CHARACTER_PINYIN, Skill.MEANING_PINYIN)
-                    2 -> setOf(Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER)
-                    3 -> setOf(Skill.CHARACTER_MEANING, Skill.PINYIN_MEANING)
-                    4 -> setOf(Skill.WRITING)
-                    else -> Skill.entries.toSet()
-                }
-                val focus = problematic.filter { it.skill in skills }.take(100)
-                if (focus.isEmpty()) toast("В этой группе нет трудных заданий") else {
-                    store.choosePracticePacks(setOf(store.activePackId))
-                    startShort(false, focus, index == 4)
-                }
-            }.setNegativeButton("Отмена", null).show()
+            chooseHardReview(problematic)
         }, 12)
-        if (problematic.isEmpty()) content.add(label("Заданий с ошибками пока нет.", 15f, muted), 12)
+        if (problematic.isEmpty()) content.add(label("Сейчас нет трудных заданий для повторения.", 15f, muted), 12)
         if (problematic.size > 100) content.add(label("Показаны 100 самых сложных заданий.", 13f, muted), 10)
-        val excluded = store.words.size * (if (store.audioEnabled) 9 else 7) - all.size
+        val excluded = store.words.size * (if (store.audioEnabled) 9 else 7) - knowledgeTasks.size
         val footer = if (excluded > 0) column().apply {
             add(label("Исключено неоднозначных направлений: $excluded. Одинаковое произношение или перевод не должны заставлять вас угадывать.", 14f, muted), 20)
         } else null
@@ -1722,6 +2007,21 @@ class MainActivity : AppCompatActivity() {
         installSectionList("stats", adapter, footer)
     }
 
+    private fun chooseHardReview(problematic: List<Task>) {
+        val groups = listOf(
+            "Все трудные задания" to problematic,
+            "Пиньинь и тоны" to problematic.filter { it.skill in setOf(Skill.CHARACTER_TONE, Skill.CHARACTER_PINYIN, Skill.MEANING_PINYIN) },
+            "Аудирование" to problematic.filter { it.skill in setOf(Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER) },
+            "Перевод" to problematic.filter { it.skill in setOf(Skill.CHARACTER_MEANING, Skill.PINYIN_MEANING) },
+            "Выбор иероглифа" to problematic.filter { it.skill in setOf(Skill.MEANING_CHARACTER, Skill.PINYIN_CHARACTER) },
+            "Написание" to problematic.filter { it.skill == Skill.WRITING }
+        ).filter { it.second.isNotEmpty() }
+        val labels = groups.map { (name, tasks) -> "$name · ${minOf(10, tasks.size)} в занятии" }
+        MaterialAlertDialogBuilder(this).setTitle("Что практиковать?").setItems(labels.toTypedArray()) { _, index ->
+            startShort(false, groups[index].second.take(10), packReview = true)
+        }.setNegativeButton("Отмена", null).show()
+    }
+
     private data class DifficultWord(val word: Word, val skill: Skill, val progress: Progress)
 
     private inner class DifficultWordCard {
@@ -1734,12 +2034,20 @@ class MainActivity : AppCompatActivity() {
             add(result, 8)
         }
 
+        private var bound: DifficultWord? = null
+        init {
+            view.add(button("Повторить задание") {
+                bound?.let { startShort(false, listOf(Task(it.word.id, it.skill)), packReview = true) }
+            }, 10)
+        }
+
         fun bind(item: DifficultWord?) {
+            bound = item
             view.visibility = if (item == null) View.INVISIBLE else View.VISIBLE
             title.text = item?.word?.let { "${it.hanzi}  ·  ${it.pinyin}" }.orEmpty()
-            skill.text = item?.skill?.title.orEmpty()
+            skill.text = item?.let { "${it.word.meanings.joinToString(" / ")}\n${it.skill.title}" }.orEmpty()
             result.text = item?.progress?.let { p ->
-                "${if (p.mastered) "Закреплено" else "На повторении"} · Ошибок ${p.errors} / попыток ${p.attempts}\nВерных подряд: ${p.streak}"
+                "На повторении · Ошибок ${p.errors} / попыток ${p.attempts}\nВерных подряд: ${p.streak}"
             }.orEmpty()
         }
     }
@@ -2043,7 +2351,7 @@ class MainActivity : AppCompatActivity() {
         val distractors = field("Похожие неверные знаки · через ;", original?.distractors?.joinToString("; ") ?: "", form)
         val alternatives = field("Другие формы слова / радикала · через ;", original?.alternatives?.joinToString("; ") ?: "", form)
         form.add(label("Например, для радикала 水 можно указать 氵. Добавляйте только формы, допустимые именно для этой карточки: они будут приниматься в ответах и показываться при проверке письма.", 13f, muted), 6)
-        val hint = field("Подсказка после ответа", original?.hint ?: "", form)
+        val hint = field("Пояснение к слову или примеру", original?.hint ?: "", form)
         val example = field("Пример на китайском (необязательно)", original?.example ?: "", form)
         val examplePinyin = field("Пиньинь примера", original?.examplePinyin ?: "", form)
         val exampleTranslation = field("Перевод примера на русский", original?.exampleTranslation ?: "", form)

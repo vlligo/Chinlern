@@ -24,7 +24,9 @@ class PackMaintenanceTest {
     @Test fun examplesRoundTripAndOldPacksRemainReadable() {
         val example = water.copy(example = "我喝水。", examplePinyin = "Wǒ hē shuǐ.", exampleTranslation = "Я пью воду.")
         assertEquals(listOf(example), StudyStore.decodeWords(StudyStore.encodeWords(listOf(example))))
-        assertTrue(StudyStore.decodeWords(StudyStore.seedJson).all { it.example.isEmpty() })
+        val legacy = """[{"hanzi":"水","pinyin":"shuǐ","numbered":"shui3","meanings":["вода"]}]"""
+        assertTrue(StudyStore.decodeWords(legacy).single().example.isEmpty())
+        assertTrue(StudyStore.decodeWords(StudyStore.seedJson).all { it.hanzi in it.example && it.exampleTranslation.isNotBlank() })
     }
 
     @Test(expected = IllegalArgumentException::class) fun partialExampleIsRejected() {

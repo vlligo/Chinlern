@@ -40,3 +40,5 @@ sync-access.properties
 __pycache__/
 *.pyc
 *-preview.png
+# Generated local exports, including private vocabulary and progress snapshots
+/output/

@@ -5,6 +5,24 @@ import org.json.JSONObject
 
 /** One schema for local storage, undo, backups and cloud snapshots. Old progress remains readable. */
 object ProgressCodec {
+    private val activityDatePattern = Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}")
+    private val validActivityDates = object : LinkedHashMap<Pair<String, String>, Boolean>(128, .75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<String, String>, Boolean>?) = size > 128
+    }
+
+    private fun validActivityDate(date: String): Boolean {
+        if (!activityDatePattern.matches(date)) return false
+        val zone = java.util.TimeZone.getDefault()
+        val key = zone.id to date
+        synchronized(validActivityDates) { if (validActivityDates[key] == true) return true }
+        val format = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).apply {
+            isLenient = false; timeZone = zone
+        }
+        val valid = runCatching { format.format(format.parse(date)!!) == date }.getOrDefault(false)
+        if (valid) synchronized(validActivityDates) { validActivityDates[key] = true }
+        return valid
+    }
+
     fun read(j: JSONObject): Progress = Progress(
         j.optInt("attempts"), j.optInt("errors"), j.optInt("streak"), j.optBoolean("mastered"),
         j.optInt("nextAt"), j.optLong("due"), j.optInt("interval"),
@@ -12,9 +30,8 @@ object ProgressCodec {
         j.optJSONObject("srs")?.let(::readMemory),
         j.optJSONObject("activity")?.let { days -> days.keys().asSequence().associateWith { key ->
             val day = days.getJSONArray(key)
-            require(key.matches(Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}")) && day.length() == 2)
-            val format = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).apply { isLenient = false }
-            require(runCatching { format.format(format.parse(key)!!) == key }.getOrDefault(false)) { "Некорректная дата занятия." }
+            require(day.length() == 2)
+            require(validActivityDate(key)) { "Некорректная дата занятия." }
             val answers = day.getInt(0); val correct = day.getInt(1)
             require(answers > 0 && correct in 0..answers)
             StudyActivity.Day(answers, correct)

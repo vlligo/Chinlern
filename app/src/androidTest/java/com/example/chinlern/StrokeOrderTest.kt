@@ -356,6 +356,7 @@ class StrokeOrderTest {
                 MainActivity::class.java.getDeclaredMethod("render").apply { isAccessible = true }.invoke(activity)
             }
             onView(withText("Показать ответ")).perform(click())
+            onView(withText("Ещё")).perform(click())
             onView(withText("Порядок черт")).perform(scrollTo(), click())
             ready(); tap("next")
             awaitJs("document.getElementById('status').textContent === 'Черта 1 из 4'")

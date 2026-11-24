@@ -10,6 +10,7 @@ data class Word(
     val alternatives: List<String> = emptyList(),
     val example: String = "", val examplePinyin: String = "", val exampleTranslation: String = ""
 ) {
+    internal val hanpingAudioAvailable by lazy { ListeningAvailability.hasRecording(numbered) }
     internal val learningIdentity by lazy { SharedWords.buildIdentity(this) }
     val writtenForms: List<String> get() = (listOf(hanzi) + alternatives).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
     fun acceptsForm(value: String) = value.trim() in writtenForms
@@ -45,12 +46,13 @@ data class Progress(
 )
 
 object Answers {
+    private val whitespace = Regex("\\s+")
     fun meaning(value: String) = value.lowercase(Locale.ROOT).replace('ё', 'е')
-        .trim().replace(Regex("\\s+"), " ").trim('.', '!', '?', ';', ',')
+        .trim().replace(whitespace, " ").trim('.', '!', '?', ';', ',')
     fun meaningMatches(value: String, word: Word) = word.meanings.any { meaning(it) == meaning(value) }
     fun tones(word: Word) = Regex("[1-5]").findAll(word.numbered).map { it.value.toInt() }.toList()
     fun pronunciationKey(word: Word) = word.numbered.lowercase(Locale.ROOT)
-        .replace("u:", "ü").replace('v', 'ü').replace(Regex("\\s+"), "")
+        .replace("u:", "ü").replace('v', 'ü').replace(whitespace, "")
 
     /** Explain each mismatch without relaxing the answer validator. */
     fun pinyinFeedback(input: String, expected: String): List<String> {

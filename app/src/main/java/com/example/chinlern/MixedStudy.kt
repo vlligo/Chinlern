@@ -6,7 +6,8 @@ class MixedStudy(val sources: List<Source>) {
     data class Origin(val packId: String, val wordId: String)
     val engine = LearningEngine()
     val origins = mutableMapOf<String, Origin>()
-    val occurrences = mutableMapOf<String, MutableList<Origin>>()
+    private val idsByOrigin = mutableMapOf<Origin, String>()
+    fun wordId(origin: Origin): String? = idsByOrigin[origin]
     val words = mutableListOf<Word>()
     init {
         val identities = mutableMapOf<SharedWords.Identity, String>()
@@ -19,7 +20,7 @@ class MixedStudy(val sources: List<Source>) {
                             words.add(word.copy(id = id))
                         }
                     }
-                    occurrences.getOrPut(id) { mutableListOf() }.add(Origin(source.id, word.id))
+                    idsByOrigin[Origin(source.id, word.id)] = id
                     Skill.entries.forEach { skill -> source.progress[Task(word.id, skill).key]?.let { p ->
                         val key = Task(id, skill).key
                         SharedWords.merge(listOfNotNull(engine.progress[key], p.copy(nextAt = (p.nextAt - source.step).coerceAtLeast(0))))
@@ -31,13 +32,13 @@ class MixedStudy(val sources: List<Source>) {
     }
     fun progressFor(source: Source): Map<String, Progress> {
         val result = source.progress.mapValues { it.value.copy() }.toMutableMap()
-        occurrences.forEach { (id, members) ->
-            members.filter { it.packId == source.id }.forEach { origin ->
-                Skill.entries.forEach { skill ->
-                    val p = engine.progress[Task(id, skill).key]
-                    if (p != null && p != Progress()) result[Task(origin.wordId, skill).key] = p.copy(nextAt = source.step + p.nextAt)
-                    else result.remove(Task(origin.wordId, skill).key)
-                }
+        for (sourceId in source.selected) {
+            val id = wordId(Origin(source.id, sourceId)) ?: continue
+            for (skill in Skill.entries) {
+                val key = Task(sourceId, skill).key
+                val p = engine.progress[Task(id, skill).key]
+                if (p != null && p != Progress()) result[key] = p.copy(nextAt = source.step + p.nextAt)
+                else result.remove(key)
             }
         }
         return result

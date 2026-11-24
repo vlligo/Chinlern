@@ -104,13 +104,13 @@ class AccidentalAnswerTest {
         store.introduce(store.words.first { it.id == "water" }) // These regressions exercise an already-previewed word.
         store.route = "quiz"; store.current = Task("water", Skill.CHARACTER_MEANING); store.save()
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            onView(withHint("Русский перевод")).perform(scrollTo(), replaceText("shui3"), closeSoftKeyboard())
+            onView(withHint("Русский перевод")).perform(replaceText("shui3"), closeSoftKeyboard())
             onView(withText("Проверить")).check(matches(isCompletelyDisplayed())).perform(click())
             assertEquals(1, StudyStore(context).engine.state(Task("water", Skill.CHARACTER_MEANING)).errors)
             scenario.recreate()
-            onView(withText("Ответил случайно — не учитывать")).check(matches(isCompletelyDisplayed())).perform(click())
+            onView(withContentDescription("Ответил случайно — не учитывать")).check(matches(isCompletelyDisplayed())).perform(click())
             onView(withText("Ответ не учтён")).perform(scrollTo()).check(matches(isDisplayed()))
-            onView(withText("Ответил случайно — не учитывать")).check(doesNotExist())
+            onView(withContentDescription("Ответил случайно — не учитывать")).check(doesNotExist())
             val reloaded = StudyStore(context)
             assertEquals(0, reloaded.engine.state(Task("water", Skill.CHARACTER_MEANING)).attempts)
             assertEquals(0, reloaded.engine.state(Task("water", Skill.CHARACTER_MEANING)).errors)

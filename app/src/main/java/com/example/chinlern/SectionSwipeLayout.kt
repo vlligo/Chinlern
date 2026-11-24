@@ -12,18 +12,31 @@ import androidx.viewpager.widget.ViewPager
 /** A native pager keeps both live pages laid out throughout dragging and settling. */
 internal class SectionSwipeLayout(context: Context) : ViewPager(context) {
     var pagingEnabled = true
+    var preparePageForDrag: ((Int) -> Unit)? = null
     private var blocked = false
     private var captured = false
+    private var downX = 0f
+    private var downY = 0f
+    private var prepared = false
 
     override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             blocked = !pagingEnabled || horizontalControlAt(this, event.x, event.y)
             captured = false
+            downX = event.x; downY = event.y; prepared = false
         }
         // Leave held touches to text selection and library drag-and-drop.
         if (!captured && event.actionMasked == MotionEvent.ACTION_MOVE &&
             event.eventTime - event.downTime >= ViewConfiguration.getLongPressTimeout()) blocked = true
         if (blocked || !pagingEnabled) return false
+        if (!prepared && event.actionMasked == MotionEvent.ACTION_MOVE) {
+            val dx = event.x - downX
+            if (kotlin.math.abs(dx) > ViewConfiguration.get(context).scaledTouchSlop &&
+                kotlin.math.abs(dx) > kotlin.math.abs(event.y - downY)) {
+                preparePageForDrag?.invoke(currentItem + if (dx < 0) 1 else -1)
+                prepared = true
+            }
+        }
         return super.onInterceptTouchEvent(event).also { if (it) captured = true }
     }
 

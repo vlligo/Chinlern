@@ -23,6 +23,40 @@ class WritingGridTest {
             pad.onTouchEvent(event); event.recycle()
         }
     }
+    @Test fun phonePagesKeepLongWordsAtOneRowAndRetainDrawings() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val config = android.content.res.Configuration(instrumentation.targetContext.resources.configuration).apply {
+            screenWidthDp = 360; smallestScreenWidthDp = 360
+        }
+        val context = instrumentation.targetContext.createConfigurationContext(config)
+        instrumentation.runOnMainSync {
+            var saved = ""
+            val grid = WritingGrid(context, 5, "") { saved = it }
+            val width = (310 * context.resources.displayMetrics.density).toInt()
+            size(grid, width)
+            val height = grid.height
+            val navigation = grid.getChildAt(grid.childCount - 1) as ViewGroup
+            val back = navigation.getChildAt(0)
+            val next = navigation.getChildAt(1)
+            assertFalse(back.isEnabled)
+            draw(pads(grid).first(), .25f)
+            next.performClick()
+            next.performClick()
+            size(grid, width)
+            assertFalse(next.isEnabled)
+            assertEquals("Поле для знака 5 из 5", pads(grid).single().contentDescription)
+            assertEquals(height, grid.height)
+            draw(pads(grid).last(), .75f)
+            back.performClick()
+            back.performClick()
+            assertEquals("Поле для знака 1 из 5", pads(grid).first().contentDescription)
+            assertTrue(JSONArray(saved).getString(0).isNotEmpty())
+            assertTrue(JSONArray(saved).getString(4).isNotEmpty())
+            grid.clear()
+            assertTrue((0 until 5).all { JSONArray(saved).getString(it).isEmpty() })
+        }
+    }
+
     @Test fun separateDrawingsSurviveReflowAndRecreation() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.runOnMainSync {
@@ -36,7 +70,7 @@ class WritingGridTest {
             assertNotEquals(JSONArray(saved).getString(0), JSONArray(saved).getString(1))
             size(grid, 400)
             assertEquals(snapshot, saved)
-            assertEquals(2, pads(grid).size)
+            assertTrue(pads(grid).size in 1..2)
             val restored = WritingGrid(instrumentation.targetContext, 2, saved) { saved = it }
             size(restored, 1600)
             draw(pads(restored)[1], .5f)

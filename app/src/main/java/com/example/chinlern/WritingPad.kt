@@ -21,7 +21,13 @@ class WritingPad(context: Context, initial: String, private val changed: (String
         try { initial.split(';').filter { it.isNotEmpty() }.forEach { line -> strokes.add(line.split('|').map { p -> p.split(',').let { it[0].toFloat() to it[1].toFloat() } }.toMutableList()) } } catch (_: Exception) { strokes.clear() }
     }
     private fun persist() = changed(strokes.joinToString(";") { line -> line.joinToString("|") { "${it.first},${it.second}" } })
-    fun clear() { drawing = false; strokes.clear(); paths.clear(); persist(); invalidate() }
+    fun clear(notify: Boolean = true) {
+        drawing = false
+        strokes.clear()
+        paths.clear()
+        if (notify) persist()
+        invalidate()
+    }
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         // Keep saved coordinates normalized; rebuild pixel paths only when the pad resizes.

@@ -14,7 +14,7 @@ class SrsStoreTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
     private var now = 1_700_000_000_000L
     private fun store() = StudyStore(context, clock = { now })
-    @Before fun reset() { context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit() }
+    @Before fun reset() { com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit() }
 
     @Test fun memoryAndRetentionSurviveReloadAndUndoExactly() {
         var s = store(); s.desiredRetention = 0.95
@@ -73,7 +73,7 @@ class SrsStoreTest {
     }
     @Test fun redrawPersistsScreenWithoutRewritingLearningData() {
         val s = store(); s.nextQuestion(); s.recordAnswer(true)
-        val prefs = context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE)
+        val prefs = com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1")
         val packs = prefs.getString("packs", null)
         var changes = 0
         s.onSyncDataChanged = { changes++ }

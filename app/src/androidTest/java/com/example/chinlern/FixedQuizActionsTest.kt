@@ -24,7 +24,7 @@ import org.junit.runner.RunWith
 class FixedQuizActionsTest {
     @Test fun allFiveTonesStayPutAcrossPicksAndReset() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit()
+        com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit()
         val store = StudyStore(context)
         val word = Word("longTonePrompt", "水".repeat(30), List(30) { "shuǐ" }.joinToString(" "),
             List(30) { "shui3" }.joinToString(" "), listOf("вода"), listOf("火", "木", "土"))
@@ -80,7 +80,7 @@ class FixedQuizActionsTest {
 
     @Test fun submitAndNextAreVisibleWithoutScrollingWithKeyboardOpen() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit()
+        com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit()
         val store = StudyStore(context)
         store.introduce(store.words.first { it.id == "water" }) // These regressions exercise an already-previewed word.
         store.beginSession()

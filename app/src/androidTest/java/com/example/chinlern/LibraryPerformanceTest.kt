@@ -7,7 +7,6 @@ import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
 import android.widget.CheckBox
-import android.widget.EditText
 import android.widget.ListView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
@@ -22,7 +21,7 @@ class LibraryPerformanceTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
     private fun fixture(count: Int) {
-        context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit()
+        com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit()
         StudyStore(context).apply {
             val seed = words.first()
             words = (0 until count).map { seed.copy(id = "word$it", hanzi = "水$it", meanings = listOf("перевод $it")) }.toMutableList()
@@ -135,15 +134,12 @@ class LibraryPerformanceTest {
                 jumpToRow(list(activity), 0)
             }
             awaitPage(scenario)
-            scenario.onActivity { activity ->
-                val search = descendants(activity.window.decorView).filterIsInstance<EditText>().single()
-                search.setText("水86")
-                assertEquals(2, list(activity).count)
-                search.setText("no matches")
-                assertEquals(1, list(activity).count)
-                search.setText("")
-                assertEquals(expectedRows(activity, 87), list(activity).count)
-            }
+            filterLibraryCards("水86")
+            scenario.onActivity { assertEquals(2, list(it).count) }
+            filterLibraryCards("no matches")
+            scenario.onActivity { assertEquals(1, list(it).count) }
+            filterLibraryCards("")
+            scenario.onActivity { assertEquals(expectedRows(it, 87), list(it).count) }
             scenario.recreate()
             scenario.onActivity { activity ->
                 val pack = data(activity).libraryPacks().single()

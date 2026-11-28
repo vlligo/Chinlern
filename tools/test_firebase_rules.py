@@ -66,6 +66,18 @@ class FirestoreRulesTest(unittest.TestCase):
         self.assertEqual(200, request(self.path + "/chunks/0", "PATCH", self.chunk(), self.token)[0])
         self.assertEqual(200, request(self.path + "/chunks/0", token=self.token)[0])
 
+    def test_text_snapshot_is_private_and_uses_the_same_limits(self):
+        path = self.path.removesuffix("/state") + "/texts"
+        chunk = path + "/chunks/0"
+        for target, body in [(path, self.manifest()), (chunk, self.chunk())]:
+            self.assertEqual(200, request(target, "PATCH", body, self.token)[0])
+            self.assertEqual(200, request(target, token=self.token)[0])
+            self.assertEqual(403, request(target, token=self.other_token)[0])
+            self.assertEqual(403, request(target, "PATCH", body, self.other_token)[0])
+        self.assertEqual(403, request(path, "PATCH", self.manifest(chunks={"integerValue": "41"}), self.token)[0])
+        self.assertEqual(403, request(chunk, "PATCH", self.chunk(200001), self.token)[0])
+        self.assertEqual(403, request(self.path.removesuffix("/state") + "/other", "PATCH", self.manifest(), self.token)[0])
+
     def test_other_account_cannot_read_or_write(self):
         for path, body in [(self.path, self.manifest()), (self.path + "/chunks/0", self.chunk())]:
             self.assertEqual(403, request(path, token=self.other_token)[0])
@@ -79,7 +91,9 @@ class FirestoreRulesTest(unittest.TestCase):
         })
         self.assertEqual(200, code)
         path = DB + "/users/" + body["localId"] + "/sync/state"
-        for target, data in [(path, self.manifest()), (path + "/chunks/0", self.chunk())]:
+        texts = path.removesuffix("/state") + "/texts"
+        for target, data in [(path, self.manifest()), (path + "/chunks/0", self.chunk()),
+                             (texts, self.manifest()), (texts + "/chunks/0", self.chunk())]:
             self.assertEqual(403, request(target, token=body["idToken"])[0])
             self.assertEqual(403, request(target, "PATCH", data, body["idToken"])[0])
             self.assertEqual(403, request(target, "DELETE", token=body["idToken"])[0])

@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "entries": 125474,
+  "source_sha256": "9594e10b88f5dde3003133f20f216ff9ae66e9f4441ee94f13b56d14e4043118",
+  "database_sha256": "026481bfcadc64aad02462d6e151cb1d86436825ea31461ba9619a716dc004e2",
+  "database_bytes": 28192768,
+  "source_header": "# CC-CEDICT\n# Community maintained free Chinese-English dictionary.\n# \n# Published by MDBG\n# \n# License:\n# Creative Commons Attribution-ShareAlike 4.0 International License\n# https://creativecommons.org/licenses/by-sa/4.0/\n# \n# Referenced works:\n# CEDICT - Copyright (C) 1997, 1998 Paul Andrew Denisowski\n# \n# CC-CEDICT can be downloaded from:\n# https://www.mdbg.net/chinese/dictionary?page=cc-cedict\n# \n# Additions and corrections can be sent through:\n# https://cc-cedict.org/editor/editor.php\n# \n# For more information about CC-CEDICT see:\n# https://cc-cedict.org/wiki/\n# \n#! version=1\n#! subversion=0\n#! format=ts\n#! charset=UTF-8\n#! entries=125474\n#! publisher=MDBG\n#! license=https://creativecommons.org/licenses/by-sa/4.0/\n#! date=2026-11-24T20:43:35Z\n#! time=1795553015"
+}

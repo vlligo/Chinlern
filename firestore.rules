@@ -6,9 +6,12 @@ service cloud.firestore {
         && request.auth.token.email_verified == true;
     }
 
-    match /users/{userId}/sync/state {
-      allow read: if owner(userId);
-      allow create, update: if owner(userId)
+    match /users/{userId}/sync/{snapshot} {
+      function syncOwner() {
+        return snapshot in ['state', 'texts'] && owner(userId);
+      }
+      allow read: if syncOwner();
+      allow create, update: if syncOwner()
         && request.resource.data.keys().hasOnly(['schema', 'chunks', 'revision'])
         && request.resource.data.schema == 1
         && request.resource.data.chunks is int
@@ -16,11 +19,11 @@ service cloud.firestore {
         && request.resource.data.chunks <= 40
         && request.resource.data.revision is string
         && request.resource.data.revision.size() <= 100;
-      allow delete: if owner(userId);
+      allow delete: if syncOwner();
 
       match /chunks/{chunkId} {
-        allow read, delete: if owner(userId);
-        allow create, update: if owner(userId)
+        allow read, delete: if syncOwner();
+        allow create, update: if syncOwner()
           && chunkId.matches('[0-9]{1,2}')
           && int(chunkId) < 40
           && request.resource.data.keys().hasOnly(['data'])

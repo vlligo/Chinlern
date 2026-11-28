@@ -3,6 +3,7 @@ package com.example.chinlern
 import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.example.chinlern.data.VocabularyReference
 import com.google.android.gms.tasks.Tasks
 import com.google.firebase.FirebaseApp
 import com.google.firebase.FirebaseOptions
@@ -60,7 +61,7 @@ class FirebaseSyncTest {
         try {
             Tasks.await(client.auth.createUserWithEmailAndPassword("gate-$suffix@example.test", "Test-password-123"), 20, TimeUnit.SECONDS)
             // Even with local opt-in, an unverified account cannot start any sync work.
-            context.getSharedPreferences("chinlearn_device_sync", Context.MODE_PRIVATE).edit().putBoolean("enabled", true).commit()
+            assertTrue(store.syncAccess.rememberPreviousAccess())
             fun assertDoesNotStart() {
                 instrumentation.runOnMainSync {
                     val sync = CloudSync(store, client.auth.currentUser!!.uid, { fail("Unexpected sync: $it") }, { _, _ -> fail("Unexpected upload") }, client.auth, client.db)
@@ -72,7 +73,7 @@ class FirebaseSyncTest {
             verifyEmail(client)
             store.syncAccess.disable()
             assertDoesNotStart()
-            context.getSharedPreferences("chinlearn_device_sync", Context.MODE_PRIVATE).edit().putBoolean("enabled", true).commit()
+            assertTrue(store.syncAccess.resume())
             assertEquals(0, sync(store, client))
             assertNotNull(store.syncRevision)
         } finally {
@@ -96,6 +97,7 @@ class FirebaseSyncTest {
         }
         try {
             assertTrue("Sync did not finish: $status", done.await(35, TimeUnit.SECONDS))
+            assertTrue(status, status == "Синхронизировано" || status == "Новые изменения ожидают отправки")
             return conflicts
         } finally { instrumentation.runOnMainSync { sync.close() } }
     }
@@ -111,21 +113,22 @@ class FirebaseSyncTest {
             Tasks.await(phone.auth.createUserWithEmailAndPassword(email, password), 20, TimeUnit.SECONDS)
             verifyEmail(phone)
             Tasks.await(tablet.auth.signInWithEmailAndPassword(email, password), 20, TimeUnit.SECONDS)
-            context.getSharedPreferences("chinlearn_device_sync", Context.MODE_PRIVATE).edit().putBoolean("enabled", true).commit()
             context.getSharedPreferences("chinlearn_profiles", Context.MODE_PRIVATE).edit()
                 .putString("guestTransferredTo", "emulator-test").commit()
             val phoneId = "firebase-test-phone-$suffix"
             val tabletId = "firebase-test-tablet-$suffix"
             listOf(phoneId, tabletId).forEach {
-                context.getSharedPreferences("chinlearn_user_$it", Context.MODE_PRIVATE).edit().clear().commit()
+                com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_user_$it").edit().clear().commit()
             }
             val phoneStore = StudyStore(context, phoneId)
+            assertTrue(phoneStore.syncAccess.rememberPreviousAccess())
             val task = Task("water", Skill.CHARACTER_MEANING)
             phoneStore.renamePack("Shared vocabulary")
             phoneStore.engine.answer(task, false, delay = 4); phoneStore.save()
             assertEquals(0, sync(phoneStore, phone))
 
             val tabletStore = StudyStore(context, tabletId)
+            assertTrue(tabletStore.syncAccess.rememberPreviousAccess())
             assertEquals(0, sync(tabletStore, tablet))
             assertEquals("Shared vocabulary", tabletStore.packName)
             assertEquals(phoneStore.syncSnapshot(), tabletStore.syncSnapshot())
@@ -147,11 +150,98 @@ class FirebaseSyncTest {
             assertEquals(1, phoneStore.packNames.size)
             assertEquals(phoneStore.syncSnapshot(), StudyStore(context, phoneId).syncSnapshot())
         } finally {
-            SyncAccess(context).disable()
+            SyncAccess(context, "firebase-test-phone-$suffix").disable()
+            SyncAccess(context, "firebase-test-tablet-$suffix").disable()
             phone.auth.signOut(); tablet.auth.signOut()
             Tasks.await(phone.db.terminate(), 10, TimeUnit.SECONDS)
             Tasks.await(tablet.db.terminate(), 10, TimeUnit.SECONDS)
             // Keep the named apps alive until the instrumentation process exits.
+        }
+    }
+    @Test fun twoDevicesSyncTextRevisionsContextsAndRecall() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("firebaseEmulators") == "true")
+        val suffix = UUID.randomUUID().toString()
+        val phone = client("text-phone-$suffix")
+        val tablet = client("text-tablet-$suffix")
+        val email = "text-$suffix@example.test"
+        val password = "Test-password-123"
+        try {
+            Tasks.await(phone.auth.createUserWithEmailAndPassword(email, password), 20, TimeUnit.SECONDS)
+            verifyEmail(phone)
+            Tasks.await(tablet.auth.signInWithEmailAndPassword(email, password), 20, TimeUnit.SECONDS)
+            context.getSharedPreferences("chinlearn_profiles", Context.MODE_PRIVATE).edit()
+                .putString("guestTransferredTo", "emulator-test").commit()
+            val phoneId = "text-phone-$suffix"
+            val tabletId = "text-tablet-$suffix"
+            val phoneStore = StudyStore(context, phoneId) { 1_000 }
+            val tabletStore = StudyStore(context, tabletId) { 2_000 }
+            assertTrue(phoneStore.syncAccess.rememberPreviousAccess())
+            assertTrue(tabletStore.syncAccess.rememberPreviousAccess())
+            val first = phoneStore.textLibrary.saveAnnotated("First", "{行|xíng}。𠀀。", "Source", null, "Перевод")
+            val word = phoneStore.textLibrary.select(first, 0, 1)
+            phoneStore.textLibrary.choosePinyin(word, "háng")
+            phoneStore.textLibrary.saveReadingPosition(first, 2)
+            phoneStore.textLibrary.inlinePinyin = true
+            phoneStore.textLibrary.annotate(word, VocabularyReference(phoneStore.activePackId, "water"))
+            val original = phoneStore.textRecall.add(word)
+
+            // Existing vocabulary clients know only about this manifest, which retains schema 1.
+            assertEquals(0, sync(phoneStore, phone))
+            val words = phone.db.collection("users").document(phone.auth.currentUser!!.uid).collection("sync").document("state")
+            val wordsRevision = Tasks.await(words.get(), 20, TimeUnit.SECONDS).getString("revision")
+            assertEquals(0, sync(tabletStore, tablet))
+            assertEquals(first, tabletStore.textLibrary.documents().single())
+            assertFalse(tabletStore.textLibrary.inlinePinyin)
+            assertEquals(listOf("háng"), tabletStore.textLibrary.pinyinChoices(first).values.toList())
+            assertEquals(2, tabletStore.textLibrary.readingPosition(first))
+            assertEquals(listOf("行 — 行。"), tabletStore.textLibrary.savedContexts(first))
+            assertEquals(original, tabletStore.textRecall.queue().targets.single())
+
+            val phoneEdit = phoneStore.textLibrary.save("Phone edit", "𠀀。", previous = first)
+            val tabletEdit = tabletStore.textLibrary.save("Tablet edit", "火。", previous = first)
+            val rare = phoneStore.textLibrary.select(phoneEdit, 0, 2)
+            val fire = tabletStore.textLibrary.select(tabletEdit, 0, 1)
+            phoneStore.textLibrary.annotate(rare, VocabularyReference(phoneStore.activePackId, "water"))
+            tabletStore.textLibrary.annotate(fire, VocabularyReference(tabletStore.activePackId, "fire"))
+            phoneStore.textRecall.add(rare)
+            tabletStore.textRecall.add(fire)
+            tabletStore.textLibrary.choosePinyin(word, null)
+            tabletStore.textLibrary.saveReadingPosition(first, 0)
+            phoneStore.textRecall.record(original, "phone-review", Fsrs.Rating.GOOD, assisted = true)
+            val latest = tabletStore.textRecall.record(original, "tablet-review", Fsrs.Rating.GOOD, assisted = false)
+
+            assertEquals(0, sync(phoneStore, phone))
+            assertEquals(0, sync(tabletStore, tablet))
+            assertEquals(0, sync(phoneStore, phone))
+            assertEquals(0, sync(tabletStore, tablet))
+            val restored = StudyStore(context, tabletId)
+            assertEquals(phoneStore.savedTextSyncSnapshot(), restored.savedTextSyncSnapshot())
+            assertEquals(wordsRevision, Tasks.await(words.get(), 20, TimeUnit.SECONDS).getString("revision"))
+            assertEquals(listOf("First", "Phone edit", "Tablet edit"), restored.textLibrary.revisions(first.id).map { it.title })
+            assertTrue(restored.textLibrary.pinyinChoices(first).isEmpty())
+            assertEquals(0, restored.textLibrary.readingPosition(first))
+            assertEquals(listOf("行", "𠀀", "火"), restored.textLibrary.savedContextLinks(first.id).map { it.quote })
+            val targets = restored.textRecall.queue().targets.associateBy { it.quote }
+            assertEquals(2, targets.getValue("𠀀").revision)
+            assertEquals(3, targets.getValue("火").revision)
+            assertEquals("火", restored.textRecall.selection(targets.getValue("火"))!!.quote)
+            val reviewed = targets.getValue("行")
+            assertEquals(latest.due, reviewed.due)
+            assertEquals("tablet-review", reviewed.reviewId)
+            assertEquals(2, reviewed.reviews)
+            assertEquals(1, reviewed.assistedReviews)
+
+            tabletStore.textLibrary.delete(tabletEdit)
+            assertEquals(0, sync(tabletStore, tablet))
+            assertEquals(0, sync(phoneStore, phone))
+            assertTrue(phoneStore.textLibrary.documents().isEmpty())
+            assertTrue(phoneStore.textRecall.queue().targets.isEmpty())
+        } finally {
+            SyncAccess(context, "text-phone-$suffix").disable()
+            SyncAccess(context, "text-tablet-$suffix").disable()
+            phone.auth.signOut(); tablet.auth.signOut()
+            Tasks.await(phone.db.terminate(), 10, TimeUnit.SECONDS)
+            Tasks.await(tablet.db.terminate(), 10, TimeUnit.SECONDS)
         }
     }
 }

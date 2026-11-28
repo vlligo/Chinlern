@@ -16,7 +16,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class WordKnowledgeStoreTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
-    @Before fun reset() { context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit() }
+    @Before fun reset() { com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit() }
 
     @Test fun mixedPacksShareKnowledgeAndKnownWordsBypassNewWordLimit() {
         var store = StudyStore(context)
@@ -51,7 +51,7 @@ class WordKnowledgeStoreTest {
         val word = store.words.first()
         store.engine.setKnown(word.id, WordKnowledge.WRITING, true)
         store.selected.remove(word.id)
-        val prefs = context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE)
+        val prefs = com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1")
         val before = prefs.all.toMap()
         val pack = store.libraryPacks().single()
         assertTrue(word.id in pack.writable)
@@ -72,11 +72,11 @@ class WordKnowledgeStoreTest {
         val store = StudyStore(context)
         store.route = "words"; store.save()
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            onView(withHint("Найти слово, пиньинь или перевод")).perform(scrollToLibraryControl(), replaceText("shui3"), closeSoftKeyboard())
+            filterLibraryCards("shui3")
             onView(withContentDescription("Узнаю слово: 水 · Мои слова")).perform(scrollToLibraryControl(), click()).check(matches(isChecked()))
             onView(withContentDescription("Умею писать: 水 · Мои слова")).check(matches(isNotChecked())).perform(scrollToLibraryControl(), click())
             scenario.recreate()
-            onView(withHint("Найти слово, пиньинь или перевод")).perform(scrollToLibraryControl(), replaceText("shui3"), closeSoftKeyboard())
+            filterLibraryCards("shui3")
             onView(withContentDescription("Узнаю слово: 水 · Мои слова")).perform(scrollToLibraryControl()).check(matches(isChecked()))
             onView(withContentDescription("Умею писать: 水 · Мои слова")).perform(scrollToLibraryControl()).check(matches(isChecked())).perform(click())
             assertTrue("water" in StudyStore(context).libraryPacks().single().recognized)

@@ -13,7 +13,7 @@ import org.junit.runner.RunWith
 class BackupStoreTest {
     @Test fun wholeLibraryMergesOfflineAndRepeatImportDoesNotDuplicateResults() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val prefs = context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE)
+        val prefs = com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1")
         prefs.edit().clear().commit()
         val original = StudyStore(context)
         original.engine.progress[Task("water", Skill.CHARACTER_MEANING).key] = Progress(attempts = 3, errors = 1, nextAt = 8)

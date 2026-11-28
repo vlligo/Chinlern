@@ -18,7 +18,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class AccidentalAnswerTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
-    @Before fun reset() { context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit() }
+    @Before fun reset() { com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit() }
 
     @Test fun wrongAnswerRestoresAllStatisticsAndScheduleAfterReload() {
         val store = StudyStore(context)

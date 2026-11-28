@@ -10,7 +10,7 @@ import org.junit.Test
 /** Disposable emulator only. These fixtures never use the personal install or cloud. */
 class SharedWordsStoreTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
-    private val prefs get() = context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE)
+    private val prefs get() = com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1")
     @Before fun reset() { prefs.edit().clear().commit() }
 
     @Test fun singlePackAnswersReachUncheckedHiddenCopiesAndUndoRestoresEveryCopyAfterReload() {

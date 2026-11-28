@@ -12,29 +12,36 @@
 <body>
 <main>
   <aside class="word-panel">
-    <header><p class="eyebrow">НАПИСАНИЕ · БЕЗ ИНТЕРНЕТА</p><h1 id="word"></h1><p id="reading"></p></header>
+    <header><h1 id="word"></h1><p id="reading"></p></header>
     <h2 class="selection-title">Выберите знак</h2>
     <div id="characters" aria-label="Выберите знак"></div>
-    <p class="help">Смотрите анимацию целиком или нажимайте «Следующая черта», чтобы двигаться по шагам.</p>
   </aside>
   <section class="card" aria-label="Анимация порядка черт">
     <p id="position"></p>
     <div id="stage">
       <svg id="grid" viewBox="0 0 320 320" aria-hidden="true"><path d="M160 0V320 M0 160H320 M0 0L320 320 M320 0L0 320"/></svg>
-      <div id="target" role="img" aria-label=""></div>
-      <svg id="guides" aria-hidden="true"></svg>
-      <p id="unavailable" hidden>Для этого знака пока нет данных о порядке черт.</p>
+      <div id="character-layer">
+        <div id="target" role="img" aria-label=""></div>
+        <svg id="completed-strokes" aria-hidden="true"></svg>
+        <svg id="guides" aria-hidden="true"></svg>
+        <p id="unavailable" hidden>Для этого знака пока нет данных о порядке черт.</p>
+      </div>
     </div>
     <p id="status" role="status" aria-live="polite">Загрузка…</p>
     <div class="guide-controls">
       <button id="show-guides" aria-pressed="false" disabled>Номера и стрелки</button>
       <p id="guide-hint" hidden>Номер — начало черты, стрелка — направление письма.</p>
     </div>
-    <p id="swipe-hint" hidden>← Смахните влево или вправо, чтобы сменить знак →</p>
     <div class="controls">
-      <button id="play" class="primary" disabled>▶ Смотреть</button>
-      <button id="next" disabled>Следующая черта</button>
-      <button id="replay" disabled>↻ Сначала</button>
+      <div class="playback-controls">
+        <button id="previous" class="icon" aria-label="Предыдущая черта" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.42-1.41L7.83 13H20z"/></svg>
+        </button>
+        <button id="play" class="icon primary" aria-label="Смотреть" disabled>▶</button>
+        <button id="next" class="icon" aria-label="Следующая черта" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11h12.17l-5.59-5.59L12 4l8 8-8 8-1.42-1.41L16.17 13H4z"/></svg>
+        </button>
+      </div>
       <button id="slow" aria-pressed="false">Медленно</button>
     </div>
   </section>

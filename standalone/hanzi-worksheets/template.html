@@ -1,0 +1,234 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hanzi practice sheets</title>
+<style>
+@font-face{font-family:WorksheetLabels;src:url(data:font/ttf;base64,__FONT_BYTES__) format("truetype")}
+*{box-sizing:border-box}body{margin:0;background:#f6f3eb;color:#263e36;font:16px system-ui,sans-serif}main{max-width:1000px;margin:auto;padding:28px}h1{font-size:32px;margin-bottom:8px}p{line-height:1.5}textarea,input,select,button{font:inherit;border:1px solid #bac8be;border-radius:8px;padding:10px}textarea{width:100%;height:110px;background:white}label{display:flex;flex-direction:column;gap:6px}.settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px;margin:20px 0}button{cursor:pointer;background:#285b49;color:white;margin:6px 8px 6px 0}button:disabled{opacity:.5;cursor:wait}#preview{background:white;margin-top:20px;box-shadow:0 3px 20px #0001}#preview svg{display:block;width:100%;height:auto}details{margin-top:24px}pre{white-space:pre-wrap;font-size:12px}#status{min-height:24px}small{color:#567063}
+</style><main><h1>Hanzi practice sheets <span lang="zh">汉字</span></h1><p>Offline прописи generator. Enter characters, preview your first page, then download a printable PDF.</p><label>Characters or words<textarea id="text" spellcheck="false" aria-describedby="entry-help">你好学习中文</textarea></label><small id="entry-help">Enter plain hanzi, or use one entry per line with optional labels: <code>学习 | xuéxí | учиться</code>. Leave either field blank, for example <code>中文 | | китайский язык</code>.</small><div class="settings"><label>Cell size (mm)<input id="size" type="number" min="12" max="30" value="20"></label><label>Practice rows / character<input id="rows" type="number" min="1" max="8" value="2"></label><label>Tracing cells / row<input id="traces" type="number" min="0" max="12" value="3"></label><label>Grid<select id="grid"><option value="cross">田字格 · Cross</option><option value="diagonal">米字格 · Diagonals</option><option value="square">Square</option></select></label><label>Stroke sequence<select id="steps"><option value="yes">Show steps</option><option value="no">Hide steps</option></select></label><label>Repeated characters<select id="duplicates"><option value="no">Keep once</option><option value="yes">Keep repetitions</option></select></label></div><button id="generate">Generate preview</button><button id="download" disabled>Download PDF</button><p id="status" role="status" aria-live="polite"></p><small>A4 • vector artwork • works offline • preview shows the first page. Spaces and punctuation are ignored. Up to 200 supported characters per sheet.</small><div id="preview"></div><details><summary>Sources and licenses</summary><p>Stroke data: Hanzi Writer Data 2.0.1 / Make Me a Hanzi. Data is embedded without modification. Worksheet generator uses its own vector renderer.</p><pre id="licenses"></pre></details></main>
+<script id="dataset" type="application/json">__DATA__</script><script id="license-data" type="application/json">__LICENSES__</script><script id="font-info" type="application/json">__FONT_INFO__</script>
+<script>
+'use strict';
+const data=JSON.parse(document.getElementById('dataset').textContent), $=id=>document.getElementById(id);
+$('licenses').textContent=JSON.parse($('license-data').textContent);
+const annotationFont = JSON.parse($('font-info').textContent);
+let pages=null;
+const W=595.276,H=841.89,margin=36,fmt=n=>Number(n.toFixed(3));
+function pathCommands(path){return path.match(/[MLQCZ]|-?\d*\.?\d+/gi)||[]}
+function glyph(page,char,x,y,size,count,color,start=0){const s=size*.82/1024,ox=x+size*.09,oy=y+size*.09+900*s;for(const path of data[char].strokes.slice(start,count)){const tokens=pathCommands(path);let i=0,px=0,py=0,parts=[];while(i<tokens.length){const op=tokens[i++];const point=()=>[ox+Number(tokens[i++])*s,oy-Number(tokens[i++])*s];if(op==='Z'){parts.push(['Z']);continue}if(op==='M'||op==='L'){[px,py]=point();parts.push([op,px,py])}else if(op==='C'){const a=point(),b=point(),c=point();parts.push(['C',...a,...b,...c]);[px,py]=c}else if(op==='Q'){const a=point(),b=point();parts.push(['C',px+2*(a[0]-px)/3,py+2*(a[1]-py)/3,b[0]+2*(a[0]-b[0])/3,b[1]+2*(a[1]-b[1])/3,...b]);[px,py]=b}else throw Error('Unsupported stroke command '+op)}page.push({type:'path',parts,color})}}
+function line(p,x,y,a,b,color=.8,width=.4){p.push({type:'line',x,y,a,b,color,width})}
+function cell(p,x,y,s,grid){line(p,x,y,x+s,y);line(p,x+s,y,x+s,y+s);line(p,x+s,y+s,x,y+s);line(p,x,y+s,x,y);if(grid!=='square'){line(p,x+s/2,y,x+s/2,y+s,.9);line(p,x,y+s/2,x+s,y+s/2,.9)}if(grid==='diagonal'){line(p,x,y,x+s,y+s,.93);line(p,x+s,y,x,y+s,.93)}}
+function label(p,text,x,y,size=9){p.push({type:'text',text,x,y,size})}
+function readEntries() {
+  const entries = [];
+  const seenPlain = new Set();
+  const missing = new Set();
+  const keepDuplicates = $('duplicates').value === 'yes';
+
+  for (const [index, line] of $('text').value.split(/\r?\n/).entries()) {
+    const [hanzi, pinyin = '', ...definitionParts] = line.split('|');
+    const definition = definitionParts.join('|');
+    const notes = [pinyin, definition].map(text => text.trim().normalize('NFC'));
+    const annotated = notes.some(Boolean);
+    const seen = annotated ? new Set() : seenPlain;
+    const chars = [], titleChars = [];
+    for (const char of hanzi) {
+      if (data[char]) {
+        titleChars.push(char);
+        if (keepDuplicates || !seen.has(char)) chars.push(char);
+        seen.add(char);
+      } else if (!/[\s\p{P}\p{N}\p{S}]/u.test(char)) {
+        missing.add(char);
+      }
+    }
+    if (annotated && !chars.length) throw Error('Line ' + (index + 1) + ' needs a supported hanzi before the first |.');
+    if (chars.length) entries.push({chars, titleChars, notes, line: index + 1});
+  }
+
+  const count = entries.reduce((sum, entry) => sum + entry.chars.length, 0);
+  if (!count) throw Error('Enter at least one supported hanzi.');
+  if (count > 200) throw Error('Please use at most 200 supported characters.');
+  return {entries, missing: [...missing], count};
+}
+
+function wrapNote(text, size, lineNumber) {
+  const maxWidth = W - 2 * margin;
+  const lines = [];
+  let line = '', width = 0;
+  for (const word of text.split(/\s+/u)) {
+    const characters = Array.from(word);
+    const advance = char => {
+      const glyph = annotationFont.chars[char];
+      if (!glyph) throw Error('Line ' + lineNumber + ': the PDF label font does not support “' + char + '”.');
+      return glyph[1] * size / 1000;
+    };
+    const wordWidth = characters.reduce((sum, char) => sum + advance(char), 0);
+    if (line && width + advance(' ') + wordWidth > maxWidth) {
+      lines.push(line);
+      line = '';
+      width = 0;
+    }
+    if (line) {
+      line += ' ';
+      width += advance(' ');
+    }
+    for (const char of characters) {
+      const charWidth = advance(char);
+      if (line && width + charWidth > maxWidth) {
+        lines.push(line);
+        line = '';
+        width = 0;
+      }
+      line += char;
+      width += charWidth;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function build() {
+  const {entries, missing, count} = readEntries();
+  const num = (id, min, max) => {
+    const n = Number($(id).value);
+    if (!Number.isInteger(n) || n < min || n > max) {
+      throw Error(id + ' must be a whole number from ' + min + ' to ' + max);
+    }
+    return n;
+  };
+  const size = num('size', 12, 30) * 72 / 25.4;
+  const rows = num('rows', 1, 8);
+  const traces = num('traces', 0, 12);
+  const cols = Math.floor((W - 2 * margin) / size);
+  const grid = $('grid').value;
+  const showSteps = $('steps').value === 'yes';
+  const result = [];
+  let page, y, index = 0;
+
+  function newPage() {
+    page = [];
+    result.push(page);
+    label(page, 'HANZI / PRACTICE SHEET', margin, 24);
+    label(page, String(result.length), W - margin - 15, H - 20);
+    y = 42;
+  }
+
+  function room(height) {
+    if (y + height > H - margin) newPage();
+  }
+
+  newPage();
+  for (const {chars, titleChars, notes, line: lineNumber} of entries) {
+    const noteLines = notes.flatMap(note => note ? wrapNote(note, 11, lineNumber) : []);
+    if (noteLines.length) {
+      const titleSize = 24;
+      const titleCols = Math.floor((W - 2 * margin) / titleSize);
+      const titleRows = Math.ceil(titleChars.length / titleCols);
+      const headerHeight = titleRows * titleSize + noteLines.length * 16 + 8;
+      const withFirstRow = headerHeight + 2 * size + 24;
+      if (withFirstRow > H - margin - 42) {
+        throw Error('Line ' + lineNumber + ': shorten the pinyin or definition to fit above the practice grid.');
+      }
+      room(withFirstRow);
+      titleChars.forEach((char, i) => {
+        glyph(page, char, margin + (i % titleCols) * titleSize,
+          y + Math.floor(i / titleCols) * titleSize, titleSize, data[char].strokes.length, .15);
+      });
+      y += titleRows * titleSize;
+      for (const text of noteLines) {
+        page.push({type: 'text', annotation: true, text, x: margin, y: y + 11, size: 11});
+        y += 16;
+      }
+      y += 8;
+    }
+
+    for (const char of chars) {
+      const total = data[char].strokes.length;
+      room(2 * size + 24);
+      glyph(page, char, margin, y, size, total, .15);
+      label(page, '#' + (++index) + '   ' + total + ' strokes', margin + size + 10, y + size / 2);
+      y += size + 8;
+
+      if (showSteps) {
+        for (let start = 0; start < total; start += cols) {
+          room(size + 16);
+          for (let j = 0; j < cols && start + j < total; j++) {
+            const x = margin + j * size;
+            cell(page, x, y, size, grid);
+            glyph(page, char, x, y, size, start + j, .65);
+            glyph(page, char, x, y, size, start + j + 1, .12, start + j);
+            label(page, String(start + j + 1), x + 3, y + 9, 7);
+          }
+          y += size + 12;
+        }
+      }
+
+      for (let row = 0; row < rows; row++) {
+        room(size + 6);
+        for (let j = 0; j < cols; j++) {
+          const x = margin + j * size;
+          cell(page, x, y, size, grid);
+          if (j < traces) glyph(page, char, x, y, size, total, .82);
+        }
+        y += size + 4;
+      }
+      y += 16;
+    }
+  }
+  return {result, missing, count};
+}
+
+function preview(p){const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox',`0 0 ${W} ${H}`);for(const o of p){let el=document.createElementNS(ns,o.type==='path'?'path':o.type==='line'?'line':'text');const attrs=o.type==='path'?{d:o.parts.map(a=>a[0]+a.slice(1).map(fmt).join(' ')).join(' '),fill:`rgb(${o.color*100}% ${o.color*100}% ${o.color*100}%)`}:o.type==='line'?{x1:o.x,y1:o.y,x2:o.a,y2:o.b,stroke:`rgb(${o.color*100}% ${o.color*100}% ${o.color*100}%)`,'stroke-width':o.width}:{x:o.x,y:o.y,'font-size':o.size,fill:'#444','font-family':o.annotation?'WorksheetLabels':'sans-serif','font-kerning':o.annotation?'none':'auto'};for(const [k,v]of Object.entries(attrs))el.setAttribute(k,v);if(o.type==='text')el.textContent=o.text;svg.appendChild(el)}$('preview').replaceChildren(svg)}
+function addAnnotationFont(add, pages) {
+  const cids = new Map();
+  for (const page of pages) {
+    for (const item of page) {
+      if (!item.annotation) continue;
+      for (const char of item.text) {
+        if (!cids.has(char)) cids.set(char, cids.size + 1);
+      }
+    }
+  }
+  if (!cids.size) return null;
+
+  const hex = (value, digits = 4) => value.toString(16).padStart(digits, '0');
+  const stream = (body, props = '') => '<< /Length ' + body.length + ' ' + props + ' >>\nstream\n' + body + '\nendstream';
+  const fontData = atob(document.querySelector('style').textContent.match(/base64,([A-Za-z0-9+/=]+)/)[1]);
+  const bytes = Array.from(fontData, char => hex(char.charCodeAt(0), 2)).join('');
+  const fontFile = add(stream(bytes + '>', '/Filter /ASCIIHexDecode /Length1 ' + fontData.length));
+  const {bounds, ascent, descent, chars} = annotationFont;
+  const descriptor = add('<< /Type /FontDescriptor /FontName /DejaVuSans /Flags 32 /FontBBox [' +
+    bounds.join(' ') + '] /ItalicAngle 0 /Ascent ' + ascent + ' /Descent ' + descent +
+    ' /CapHeight 729 /StemV 80 /FontFile2 ' + fontFile + ' 0 R >>');
+  const widths = [...cids.keys()].map(char => chars[char][1]);
+  const glyphs = '0000' + [...cids.keys()].map(char => hex(chars[char][0])).join('');
+  const glyphMap = add(stream(glyphs + '>', '/Filter /ASCIIHexDecode'));
+  const descendant = add('<< /Type /Font /Subtype /CIDFontType2 /BaseFont /DejaVuSans ' +
+    '/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> ' +
+    '/FontDescriptor ' + descriptor + ' 0 R /CIDToGIDMap ' + glyphMap + ' 0 R /W [1 [' +
+    widths.join(' ') + ']] >>');
+
+  const mappings = [...cids].map(([char, cid]) => {
+    const utf16 = char.split('').map(unit => hex(unit.charCodeAt(0))).join('');
+    return '<' + hex(cid) + '> <' + utf16 + '>';
+  });
+  const cmap = [
+    '/CIDInit /ProcSet findresource begin', '12 dict begin', 'begincmap',
+    '/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def',
+    '/CMapName /WorksheetLabels def', '/CMapType 2 def',
+    '1 begincodespacerange', '<0000> <ffff>', 'endcodespacerange',
+  ];
+  for (let i = 0; i < mappings.length; i += 100) {
+    const group = mappings.slice(i, i + 100);
+    cmap.push(group.length + ' beginbfchar', ...group, 'endbfchar');
+  }
+  cmap.push('endcmap', 'CMapName currentdict /CMap defineresource pop', 'end', 'end');
+  const unicode = add(stream(cmap.join('\n')));
+  const id = add('<< /Type /Font /Subtype /Type0 /BaseFont /DejaVuSans /Encoding /Identity-H ' +
+    '/DescendantFonts [' + descendant + ' 0 R] /ToUnicode ' + unicode + ' 0 R >>');
+  return {id, encode: text => Array.from(text, char => hex(cids.get(char))).join('')};
+}
+
+function pdf(pages){const objects=[];const add=s=>(objects.push(s),objects.length);add('<< /Type /Catalog /Pages 2 0 R >>');add('');const font=add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'),kids=[];const annotations=addAnnotationFont(add,pages);for(const page of pages){let stream='';for(const o of page){if(o.type==='path'){stream+=`${o.color} g\n`;for(const a of o.parts){if(a[0]==='Z')stream+='h\n';else{let values=a.slice(1).map((v,i)=>fmt(i%2?H-v:v));stream+=values.join(' ')+' '+({M:'m',L:'l',C:'c'}[a[0]])+'\n'}}stream+='f\n'}else if(o.type==='line'){stream+=`${o.color} G ${o.width} w ${fmt(o.x)} ${fmt(H-o.y)} m ${fmt(o.a)} ${fmt(H-o.b)} l S\n`}else if(o.annotation){stream+=`0.25 g BT /F2 ${o.size} Tf ${fmt(o.x)} ${fmt(H-o.y)} Td <${annotations.encode(o.text)}> Tj ET\n`}else stream+=`0.25 g BT /F1 ${o.size} Tf ${fmt(o.x)} ${fmt(H-o.y)} Td (${o.text}) Tj ET\n`}const content=add(`<< /Length ${stream.length} >>\nstream\n${stream}endstream`);kids.push(add(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /Font << /F1 ${font} 0 R ${annotations ? "/F2 " + annotations.id + " 0 R" : ""} >> >> /Contents ${content} 0 R >>`))}objects[1]=`<< /Type /Pages /Kids [${kids.map(n=>n+' 0 R').join(' ')}] /Count ${kids.length} >>`;let out='%PDF-1.4\n',offsets=[0];objects.forEach((o,i)=>{offsets.push(out.length);out+=`${i+1} 0 obj\n${o}\nendobj\n`});const offset=out.length;out+=`xref\n0 ${objects.length+1}\n0000000000 65535 f \n`+offsets.slice(1).map(n=>String(n).padStart(10,'0')+' 00000 n \n').join('')+`trailer\n<< /Size ${objects.length+1} /Root 1 0 R >>\nstartxref\n${offset}\n%%EOF\n`;return out}
+$('generate').onclick=()=>{try{const b=build();pages=b.result;preview(pages[0]);$('download').disabled=false;$('status').textContent=`${b.count} characters · ${pages.length} pages.`+(b.missing.length?' Unsupported characters skipped: '+b.missing.join(' '):'')}catch(e){pages=null;$('download').disabled=true;$('preview').replaceChildren();$('status').textContent=e.message}};
+$('download').onclick=()=>{if(!pages)return;const url=URL.createObjectURL(new Blob([pdf(pages)],{type:'application/pdf'}));const a=document.createElement('a');a.href=url;a.download='hanzi-practice.pdf';a.click();setTimeout(()=>URL.revokeObjectURL(url),30000)};
+for(const el of document.querySelectorAll('input,select,textarea'))el.addEventListener('input',()=>{pages=null;$('download').disabled=true;$('status').textContent='Settings changed. Generate a new preview.'});
+$('generate').click();
+</script></html>

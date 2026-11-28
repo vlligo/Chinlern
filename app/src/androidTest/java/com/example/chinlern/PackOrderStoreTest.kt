@@ -8,7 +8,7 @@ import org.junit.Test
 class PackOrderStoreTest {
     @Test fun sortedNamesSurviveRenameAndReloadWithoutChangingPracticeSelection() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit()
+        com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit()
         var store = StudyStore(context)
         val word = store.words.first()
         store.renamePack("Zebra")

@@ -1,0 +1,8 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="@color/chinlern_jade" android:pathData="M3,9 H6.5 L12,4.5 V19.5 L6.5,15 H3 Z" />
+    <path android:strokeColor="@color/chinlern_jade" android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:pathData="M15,9 Q18,12 15,15 M17.5,6 Q23,12 17.5,18" />
+</vector>

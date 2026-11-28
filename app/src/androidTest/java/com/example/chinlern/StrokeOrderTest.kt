@@ -65,15 +65,23 @@ class StrokeOrderTest {
     private fun tap(id: String) { js("document.getElementById('$id').click()") }
     private fun swipeCharacter(left: Boolean, selector: String = "#stage", vertical: Boolean = false) {
         val rect = org.json.JSONObject(js("(() => { const r=document.querySelector('$selector').getBoundingClientRect(); return {x:r.x,y:r.y,w:r.width,h:r.height,viewport:innerWidth}; })()"))
-        fun coordinates(view: View, fraction: Float): FloatArray {
+        val viewport = rect.getDouble("viewport")
+        val width = rect.getDouble("w")
+        val startFraction = if (left) .8 else .2
+        val startX = rect.getDouble("x") + width * if (vertical) .5 else startFraction
+        // A swipe may start on a 48 px icon and continue beyond its hit area.
+        val distance = maxOf(width * .6, 56.0)
+        val endX = if (vertical) startX else (startX + if (left) -distance else distance).coerceIn(1.0, viewport - 1)
+        fun coordinates(view: View, x: Double, fraction: Double): FloatArray {
             val location = IntArray(2); view.getLocationOnScreen(location)
-            val scale = view.width / rect.getDouble("viewport")
+            val scale = view.width / viewport
             return floatArrayOf(
-                (location[0] + (rect.getDouble("x") + rect.getDouble("w") * if (vertical) .5 else fraction.toDouble()) * scale).toFloat(),
-                (location[1] + (rect.getDouble("y") + rect.getDouble("h") * if (vertical) fraction.toDouble() else .5) * scale).toFloat())
+                (location[0] + x * scale).toFloat(),
+                (location[1] + (rect.getDouble("y") + rect.getDouble("h") * if (vertical) fraction else .5) * scale).toFloat()
+            )
         }
         onView(isAssignableFrom(WebView::class.java)).perform(GeneralSwipeAction(Swipe.FAST,
-            { coordinates(it, if (left) .8f else .2f) }, { coordinates(it, if (left) .2f else .8f) }, Press.FINGER))
+            { coordinates(it, startX, startFraction) }, { coordinates(it, endX, 1 - startFraction) }, Press.FINGER))
     }
 
     @Test fun swipesOutsideDrawingKeepButtonTapsAndVerticalScrolling() {
@@ -85,7 +93,7 @@ class StrokeOrderTest {
             swipeCharacter(left = true, selector = "#play")
             awaitJs("document.querySelector('.chip[aria-pressed=true]').textContent === '好'"); ready()
             Thread.sleep(300)
-            assertEquals("\"▶ Смотреть\"", js("document.getElementById('play').textContent"))
+            assertEquals("\"Смотреть\"", js("document.getElementById('play').getAttribute('aria-label')"))
             // A real tap after a swipe still activates its button.
             val point = org.json.JSONArray(js("(() => { const r=document.getElementById('play').getBoundingClientRect(); return [r.x+r.width/2,r.y+r.height/2,innerWidth]; })()"))
             onView(isAssignableFrom(WebView::class.java)).perform(androidx.test.espresso.action.GeneralClickAction(
@@ -94,7 +102,7 @@ class StrokeOrderTest {
                     val scale = view.width / point.getDouble(2)
                     floatArrayOf((offset[0]+point.getDouble(0)*scale).toFloat(), (offset[1]+point.getDouble(1)*scale).toFloat())
                 }, Press.FINGER))
-            awaitJs("document.getElementById('play').textContent.includes('Пауза')")
+            awaitJs("document.getElementById('play').getAttribute('aria-label').includes('Пауза')")
             tap("play")
             js("document.getElementById('credits').open = true")
             awaitJs("document.querySelectorAll('#licenses pre').length === 2")
@@ -126,20 +134,33 @@ class StrokeOrderTest {
             }
             assertEquals("4", js("document.querySelectorAll('.guide-number').length"))
             assertEquals("false", js("document.getElementById('next').disabled"))
-            assertEquals("\"К первой черте\"", js("document.getElementById('next').textContent"))
-            tap("replay")
-            awaitJs("document.getElementById('status').textContent === 'Черта 4 из 4' && document.getElementById('play').textContent.includes('Повторить')")
+            assertEquals("\"К первой черте\"", js("document.getElementById('next').getAttribute('aria-label')"))
+            tap("previous")
+            awaitJs("document.getElementById('status').textContent === 'Черта 3 из 4'")
+            assertEquals("3", js("document.querySelectorAll('#completed-strokes path').length"))
+            assertEquals("\"3\"", js("document.querySelector('.guide-number text').textContent"))
+            tap("next")
+            awaitJs("document.getElementById('status').textContent === 'Черта 4 из 4'")
+            tap("next")
+            awaitJs("document.getElementById('status').textContent === 'Черта 1 из 4'")
+            assertEquals("0", js("document.querySelectorAll('#completed-strokes path').length"))
+            assertEquals("true", js("document.getElementById('previous').disabled"))
+            tap("play")
+            awaitJs("document.getElementById('status').textContent === 'Черта 4 из 4' && document.getElementById('play').getAttribute('aria-label').includes('Повторить')")
+            tap("play")
+            awaitJs("document.getElementById('status').textContent === 'Черта 1 из 4'")
+            awaitJs("document.getElementById('status').textContent === 'Черта 4 из 4' && document.getElementById('play').getAttribute('aria-label').includes('Повторить')")
         }
     }
 
     @Test fun nextStrokeWorksDuringPlaybackPauseAndRapidTaps() {
         launch("水").use {
             ready(); tap("slow"); ready(); tap("play"); tap("play")
-            assertEquals("\"▶ Продолжить\"", js("document.getElementById('play').textContent"))
+            assertEquals("\"Продолжить\"", js("document.getElementById('play').getAttribute('aria-label')"))
             assertEquals("false", js("document.getElementById('next').disabled"))
             tap("next")
             awaitJs("document.getElementById('status').textContent === 'Черта 2 из 4' && !document.getElementById('play').disabled")
-            assertEquals("\"▶ Смотреть\"", js("document.getElementById('play').textContent"))
+            assertEquals("\"Смотреть\"", js("document.getElementById('play').getAttribute('aria-label')"))
             js("document.getElementById('next').click(); document.getElementById('next').click()")
             awaitJs("document.getElementById('status').textContent === 'Черта 4 из 4'")
             tap("next")
@@ -162,7 +183,7 @@ class StrokeOrderTest {
             assertEquals("\"1\"", js("document.querySelector('.guide-number text').textContent"))
             tap("show-guides")
             assertEquals("0", js("document.getElementById('guides').childElementCount"))
-            assertEquals("\"▶ Продолжить\"", js("document.getElementById('play').textContent"))
+            assertEquals("\"Продолжить\"", js("document.getElementById('play').getAttribute('aria-label')"))
             tap("show-guides"); tap("next")
             awaitJs("document.getElementById('status').textContent === 'Черта 2 из 4' && !document.getElementById('play').disabled")
             assertEquals("\"2\"", js("document.querySelector('.guide-number text').textContent"))
@@ -224,7 +245,7 @@ class StrokeOrderTest {
     @Test fun pauseResumeAndRapidCharacterChanges() {
         launch("水你好").use {
             ready(); tap("slow"); ready(); tap("play"); tap("play")
-            assertEquals("\"▶ Продолжить\"", js("document.getElementById('play').textContent"))
+            assertEquals("\"Продолжить\"", js("document.getElementById('play').getAttribute('aria-label')"))
             val status = js("document.getElementById('status').textContent")
             Thread.sleep(800)
             assertEquals(status, js("document.getElementById('status').textContent"))
@@ -320,7 +341,7 @@ class StrokeOrderTest {
         launch("𠀀水!").use {
             awaitJs("!document.getElementById('unavailable').hidden")
             assertEquals("3", js("document.querySelectorAll('.chip').length"))
-            assertEquals("true", js("document.getElementById('play').disabled && document.getElementById('next').disabled"))
+            assertEquals("true", js("['play', 'previous', 'next'].every(id => document.getElementById(id).disabled)"))
             assertEquals("0", js("document.getElementById('guides').childElementCount"))
             js("document.querySelectorAll('.chip')[1].click()")
             ready()
@@ -356,7 +377,7 @@ class StrokeOrderTest {
                 MainActivity::class.java.getDeclaredMethod("render").apply { isAccessible = true }.invoke(activity)
             }
             onView(withText("Показать ответ")).perform(click())
-            onView(withText("Ещё")).perform(click())
+            onView(withContentDescription("Ещё")).perform(click())
             onView(withText("Порядок черт")).perform(scrollTo(), click())
             ready(); tap("next")
             awaitJs("document.getElementById('status').textContent === 'Черта 1 из 4'")

@@ -10,6 +10,10 @@ Native Android vocabulary practice in Kotlin, built on the supplied Android Stud
 4. If listening is unavailable, open **Настройки → Настройки голоса Android** and download a Chinese voice. You can choose Hanping instead, or temporarily turn off listening questions.
 5. Use **Прогресс** to inspect difficulties. Due reviews appear automatically when you start studying; you do not need to finish a cycle to unlock them.
 
+## Local word lookup
+
+Open **Слова → Поиск по всем словам** to search all your packs, including hidden packs, by written form, pinyin, or translation. The **Словарь** button on a vocabulary card or revealed quiz opens local word details with pack membership, notes, examples, audio, and external dictionary actions. In an example sentence, select text and choose **Найти слово**; adjust the selection handles to choose the intended Chinese word. Lookup does not select words for learning or change progress. Personal results appear first, followed by the bundled CC-CEDICT English dictionary. See [ROADMAP.md](ROADMAP.md) for future work.
+
 ## Exercises
 
 Nine knowledge directions: character → Russian; character → pinyin; Russian → pinyin; pinyin → Russian; Russian → character; pinyin → character; character → tones; audio → Russian; audio → character. Writing is tracked separately.
@@ -72,11 +76,13 @@ Sync starts off for accounts that have never unlocked it. The separate access pa
 
 `SyncAccess.kt` reads a SHA-256 verifier from a generated build constant. The verifier is supplied through ignored local configuration and is not published in this repository. It is a local feature gate, not a server authorization secret against a modified app. Firestore authorization separately requires the account owner and a verified email token. The first account used on a device receives its existing local library. Additional accounts have separate local libraries; signing out retains each account's pending changes for its next sign-in. The original guest library remains available when signed out.
 
-Packs, vocabulary, accepted synonyms, selected practice packs and word checkboxes, knowledge and writing progress, and review dates sync. Update the app on every device to sync practice pack choices; older snapshots retain the device's existing choices. Voice settings, navigation and unfinished answers/drawings remain local. Practice works without a connection. Changes sync after a short delay while the app is running, when it returns to the foreground, or with **Синхронизировать сейчас**, only while sync is enabled and email is verified. Failed syncs preserve local data and retry with backoff; Android need not keep a stopped app running.
+Packs, vocabulary, accepted synonyms, selected practice packs and word checkboxes, knowledge and writing progress, and review dates sync. Update the app on every device to sync practice pack choices; older snapshots retain the device's existing choices. Voice settings, reader display settings, navigation and unfinished answers/drawings remain local. Practice works without a connection. Changes sync after a short delay while the app is running, when it returns to the foreground, or with **Синхронизировать сейчас**, only while sync is enabled and email is verified. Failed syncs preserve local data and retry with backoff; Android need not keep a stopped app running.
 
 Sync stores compressed current state, not an ever-growing answer history. Concurrent app changes merge within the original pack by word, field, selection and skill; sync no longer creates conflict-copy packs. Independent vocabulary edits and skill results survive together. A simultaneous edit to the exact same scalar field uses the uploading value. A concurrent deletion versus an edit retains the edited item. For simultaneous changes to one skill, attempts/errors/confusions use maxima (snapshots lack unique answer IDs, so summing would double-count shared history); disputed mastery remains unmastered. Retry merges do not inflate counters. Queue delays are rebased to the merged step. Existing conflict copies are left intact because older copies do not record their source pack. If a device edits data during upload, those changes are retained for the next sync. Server transactions prevent partial snapshot uploads. Successful sync and its local baseline are saved together.
 
-Storage is bounded to 8 MB compressed / 32 MB expanded per account, split into documents below Firestore's document limit. Exceeding this limit reports an error and retains local data. Snapshots overwrite prior chunks and remove surplus chunks; reading/uploading a changed library transfers the current snapshot, so very large libraries or many users may reach Firebase's bandwidth or operation quotas. There is no permanent activity log or paid Cloud Functions dependency.
+Texts sync through the same account and switch. Each text carries its revisions, translations, annotations, saved word contexts, pronunciation choices, reading positions, and recall progress. Concurrent edits retain both revisions. A text or recall target deleted on one device is deleted on the other devices, including after a concurrent edit. For concurrent reviews of the same fragment, sync keeps the latest schedule and merges recent review IDs and assisted-review history. Lifetime counts use retry-safe maxima once older review IDs have expired.
+
+Vocabulary and texts each have a separate 8 MB compressed / 32 MB expanded snapshot per account, split into documents below Firestore's document limit. Exceeding this limit reports an error and retains local data. Snapshots overwrite prior chunks and remove surplus chunks; reading/uploading a changed library transfers the current snapshot, so very large libraries or many users may reach Firebase's bandwidth or operation quotas. There is no permanent activity log or paid Cloud Functions dependency.
 
 ### Firebase project setup
 
@@ -86,7 +92,7 @@ In Firebase Console:
 
 1. Enable **Authentication → Sign-in method → Email/Password**.
 2. Create the default **Cloud Firestore Standard edition** database, starting in Production mode. The free Spark plan is sufficient for initial use.
-3. Open **Firestore → Rules**, replace the rules with the complete contents of `firestore.rules`, and **Publish**. These rules allow a signed-in user with a verified email to access only their own sync documents, validate document shape and size, and deny other paths.
+3. Open **Firestore → Rules**, replace the rules with the complete contents of `firestore.rules`, and **Publish**. These rules allow a signed-in user with a verified email to access only their own sync documents, validate document shape and size, and deny other paths. Existing installations need these updated rules in production before texts can sync. Older app versions continue to sync vocabulary through the original manifest.
 
 With an authenticated Firebase CLI, deploy rules and the binary-payload index exemption with:
 
@@ -107,7 +113,7 @@ firebase emulators:start --only auth,firestore --project demo-chinlearn
 python3 tools/test_firebase_rules.py
 ```
 
-`SyncSnapshotTest` covers merges, deletions, repeat uploads, compression, and edits during an upload. `SyncStoreTest` covers account isolation, migration, restoring progress, drafts, and rejecting malformed state. `FirebaseSyncTest` exercises two clients signing into the same emulator account, downloading a library, preserving concurrent offline progress, and repeating sync without duplicate copies or attempts. Run the latter only on an Android emulator with the Firebase emulators running on the host:
+`SyncSnapshotTest` covers merges, deletions, repeat uploads, compression, and edits during an upload. `SyncStoreTest` covers account isolation, migration, restoring progress, drafts, and rejecting malformed state. `FirebaseSyncTest` exercises two clients signing into the same emulator account, downloading a library, preserving concurrent offline progress, merging concurrent text revisions with their original spans, and repeating sync without duplicate copies or attempts. Run the latter only on an Android emulator with the Firebase emulators running on the host:
 
 ```sh
 adb -s emulator-5554 shell am instrument -w \
@@ -407,3 +413,26 @@ Vocabulary decoding retains current pack versions instead of thrashing an eight-
 Validation: debug and instrumentation builds, all 106 JVM tests and lint pass (0 errors, 65 warnings). All eight new Back checks, eight existing section-navigation checks and thirteen stroke-viewer checks passed across the focused emulator runs. The viewer integration test now opens its existing More menu. A real Back-key/edge-gesture recording was visually inspected. In a 500-word phone-emulator fixture, five measured runs after a warm-up gave median handler times of 36.5 ms for the previous full-rebuild path versus 0.79 ms for page reuse, compared in the same build. This measures synchronous handler work, not complete frame times or physical-device performance. Personal-device installs and data were not changed.
 
 Quiz-exit follow-up: the earlier handler-only comparison missed layout work on quiz exit. A private study-only copy with 41 packs, 815 card occurrences and 3,718 progress entries reproduced the delay on an API 37 phone emulator. Measured from Back dispatch to hardware frame submission, the first return fell from 1,127 ms to 382 ms; three subsequent returns fell from 584–666 ms to 65–88 ms. These are emulator measurements, not physical-device guarantees. The first-frame regression also verifies current answer totals and that only Learn is prepared before this frame, with immediate tab navigation preparing its target synchronously. Debug/instrumentation builds, all 107 JVM tests, 46 focused Android checks and lint pass (0 errors, 65 warnings), including shared progress, undo, backup imports and sync updates. Account and sync credentials were excluded from the emulator fixture; the personal phone was read only.
+
+
+## Local storage and upgrades
+
+Version 2.8 moves each guest/account profile to SQLite automatically. Library and session changes commit together; the original preferences and an immutable database snapshot are retained for recovery. Sync and exported library backups retain their existing format. Do not downgrade the installed app to a preference-backed version: it would read the old pre-migration data. Export a current library backup when transferring data to another compatible installation.
+
+
+## Short text reader
+
+Open **Слова → Мои тексты → Добавить текст**, enter a title and paste a short Chinese passage. Select a word and choose **Найти слово** to inspect your local vocabulary. **Сохранить контекст** keeps its sentence linked to the selected card; **Добавить новое слово из текста** prefills the normal card editor.
+
+Choose **Учить текст** on a text card to preview and recall each sentence in order. Long sentences are split into fragments. Rate what you remembered after revealing the answer. Reopening the mode resumes at the first unrated fragment in that version. Rated fragments also appear under **Повторение текстов** and share the same review schedule.
+
+Under **Действия с текстом → Чтение по предложениям**, use the bottom arrows to move between sentences from your current reading position. Use **Скрыть текст** and **Прослушать** to listen before checking the sentence. Playback uses the device’s Chinese voice and follows the app’s slow-audio setting. Choose **Запомнить предложение** to practise recalling the sentence, reveal it, and rate your recall. It is saved under **Повторение текстов**. For longer sentences, choose a fragment to learn. **Открыть в тексте** jumps to the highlighted sentence in the same version for word lookup.
+
+Edits create new versions, with earlier texts and contexts available under **Версии текста**. With account sync enabled, texts and their revision history appear on your other devices running the updated app. Use **Копировать текст** to copy a passage out. JSON library exports cover vocabulary and vocabulary progress.
+
+
+## Offline dictionary
+
+Lookup includes CC-CEDICT with 125,474 entries. Search simplified/traditional Chinese, pinyin (with digits, tone marks, or without tones), or English keywords. Personal translations remain separate and appear first. Dictionary lookup does not add learning cards.
+
+The dictionary works without internet. First use prepares the bundled database in the background. It adds about 12.45 MB compressed to the app and 28.19 MB of installed storage, excluded from personal backups. Definitions are English; Russian definitions currently come from your own vocabulary. **О словаре CC-CEDICT** shows attribution and the CC BY-SA 4.0 license. Build/source instructions are in [dictionary-source/README.md](dictionary-source/README.md).

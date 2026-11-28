@@ -24,7 +24,7 @@ class ReachableListeningTest {
     private fun render(activity: MainActivity) = MainActivity::class.java.getDeclaredMethod("render")
         .apply { isAccessible = true }.invoke(activity)
     private fun seed(): StudyStore {
-        context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit()
+        com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit()
         return StudyStore(context).apply {
             audioEnabled = true; audioProvider = "hanping"; speakAfterAnswer = false
             introduce(words.first { it.id == "water" })
@@ -52,7 +52,7 @@ class ReachableListeningTest {
             }
             idle()
             scenario.onActivity { assertEquals("A redraw must not replay", listOf("水"), sent) }
-            onView(withText("▶  Послушать")).perform(scrollTo(), click())
+            onView(withContentDescription("Послушать")).perform(scrollTo(), click())
             Thread.sleep(2100)
             scenario.onActivity { activity ->
                 assertEquals(listOf("水", "水"), sent)
@@ -95,9 +95,9 @@ class ReachableListeningTest {
             }
             onView(withText("水")).perform(click())
             onView(withText("Дальше")).check(matches(isCompletelyDisplayed()))
-            onView(withText("Ещё")).perform(click())
+            onView(withContentDescription("Ещё")).perform(click())
             onView(withText("Порядок черт")).check(matches(isDisplayed()))
-            onView(withText("Закрыть меню")).perform(scrollTo(), click())
+            onView(withContentDescription("Закрыть меню")).perform(scrollTo(), click())
         }
     }
 

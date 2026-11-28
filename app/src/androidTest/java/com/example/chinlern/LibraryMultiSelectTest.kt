@@ -16,7 +16,7 @@ import org.junit.runner.RunWith
 class LibraryMultiSelectTest {
     @Test fun wordsPageSelectsMultiplePacksAndRetainsSelectionOnRotation() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit()
+        com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit()
         val store = StudyStore(context)
         store.importPack("Second", listOf(store.words.first()))
         store.route = "words"; store.save()
@@ -32,7 +32,7 @@ class LibraryMultiSelectTest {
             assertEquals(16, StudyStore(context).studyWords.size)
             scenario.recreate()
             onView(libraryPracticePicker(2)).check(matches(isDisplayed()))
-            onView(withHint("Найти слово, пиньинь или перевод")).perform(scrollToLibraryControl(), replaceText("Second"), closeSoftKeyboard())
+            filterLibraryCards("Second")
             onView(withContentDescription("Учить 水 · Second")).perform(scrollToLibraryControl(), click())
             val restored = StudyStore(context)
             assertEquals(16, restored.studyWords.size)

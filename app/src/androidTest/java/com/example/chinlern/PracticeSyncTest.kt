@@ -15,7 +15,8 @@ class PracticeSyncTest {
 
     @Before fun reset() {
         listOf("chinlearn_v1", "chinlearn_profiles", "chinlearn_user_test-a", "chinlearn_user_test-b").forEach {
-            context.getSharedPreferences(it, Context.MODE_PRIVATE).edit().clear().commit()
+            if (it == "chinlearn_profiles") context.getSharedPreferences(it, Context.MODE_PRIVATE).edit().clear().commit()
+            else com.example.chinlern.data.ProfileStorage.open(context, it).edit().clear().commit()
         }
     }
 

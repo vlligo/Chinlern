@@ -18,7 +18,7 @@ class SessionRefreshTest {
     }.timeInMillis
     private fun store() = StudyStore(context, clock = { now })
     @Before fun reset() {
-        context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit()
+        com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit()
     }
     @Test fun shortBreakRetainsQuestionDraftAndCounters() {
         val first = store()

@@ -28,7 +28,7 @@ class SyncAccessTest {
     @Test fun priorSuccessfulSyncMigratesWithoutPassword() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         context.getSharedPreferences("chinlearn_device_sync", Context.MODE_PRIVATE).edit().clear().commit()
-        context.getSharedPreferences("chinlearn_user_returning", Context.MODE_PRIVATE).edit().clear()
+        com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_user_returning").edit().clear()
             .putLong("lastSyncedAt", 1234).putString("packs", "{}").commit()
         assertTrue(StudyStore(context, "returning").syncAccess.enabled)
         assertTrue(StudyStore(context, "returning").syncAccess.hasAccess)

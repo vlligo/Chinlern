@@ -38,7 +38,7 @@ class BackNavigationTest {
     private fun event(progress: Float, edge: Int = BackEventCompat.EDGE_LEFT) = BackEventCompat(0f, 300f, progress, edge)
 
     @Before fun fixture() {
-        context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit()
+        com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit()
         StudyStore(context).apply { onboardingDone = true; route = "learn"; save() }
     }
 
@@ -92,14 +92,14 @@ class BackNavigationTest {
             for (edge in listOf(BackEventCompat.EDGE_LEFT, BackEventCompat.EDGE_RIGHT)) {
                 scenario.onActivity {
                     host(it).setCurrentItem(3, false)
-                    val before = context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).all.toMap()
+                    val before = com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").all.toMap()
                     it.onBackPressedDispatcher.dispatchOnBackStarted(event(0f, edge))
                     it.onBackPressedDispatcher.dispatchOnBackProgressed(event(.7f, edge))
                     assertTrue(host(it).scaleX < 1f)
                     assertTrue(if (edge == BackEventCompat.EDGE_LEFT) host(it).translationX > 0 else host(it).translationX < 0)
                     it.onBackPressedDispatcher.dispatchOnBackCancelled()
                     assertEquals("settings", store(it).route)
-                    assertEquals(before, context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).all)
+                    assertEquals(before, com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").all)
                 }
                 settled(scenario)
                 scenario.onActivity { assertRestored(host(it)) }

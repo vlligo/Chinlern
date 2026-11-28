@@ -17,7 +17,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class LearningFlowTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
-    @Before fun resetTestData() { context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit() }
+    @Before fun resetTestData() { com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit() }
     @Test fun restoredFeedbackDropsUnavailableListeningQuestionWithoutChangingProgress() {
         val store = StudyStore(context)
         val word = Word("there", "那儿", "nàr", "nar4", listOf("там"), listOf("水", "木", "火"))
@@ -143,7 +143,7 @@ class LearningFlowTest {
             onView(withText("вода")).check(doesNotExist())
             onView(withText("水")).check(doesNotExist())
             onView(withText("shuǐ")).check(doesNotExist())
-            onView(withText("▶  Послушать")).check(matches(isDisplayed()))
+            onView(withContentDescription("Послушать")).check(matches(isDisplayed()))
         }
     }
     @Test fun bulkImportResetsOnlyReplacedCards() {

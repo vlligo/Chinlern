@@ -3,5 +3,14 @@
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
     <color name="chinlern_paper">#F9F6EE</color>
+    <color name="chinlern_ink">#2B302B</color>
+    <color name="chinlern_red">#9F2936</color>
+    <color name="chinlern_jade">#244B44</color>
+    <color name="chinlern_pale_jade">#EAEFE4</color>
+    <color name="chinlern_muted">#696D63</color>
+    <color name="chinlern_gold">#AD7E29</color>
+    <color name="chinlern_blush">#F7E8E1</color>
+    <color name="chinlern_reading_surface">#FFFCF7</color>
+    <color name="chinlern_reading_gold_wash">#F4E4BA</color>
     <color name="chinlern_launch_red">#811924</color>
 </resources>

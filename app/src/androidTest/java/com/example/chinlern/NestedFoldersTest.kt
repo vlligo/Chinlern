@@ -41,7 +41,7 @@ class NestedFoldersTest {
     }
 
     @Test fun folderMenuNestsWholeBranchAndBothTreesCollapseDescendants() {
-        context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit()
+        com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit()
         val store = StudyStore(context)
         val first = store.activePackId
         store.renamePack("Lesson")

@@ -28,7 +28,7 @@ class QuizReturnPerformanceTest {
         // An explicitly supplied private emulator fixture can reproduce a real library.
         if (InstrumentationRegistry.getArguments().getString("useSavedLibrary") == "true") return
         val context = instrumentation.targetContext
-        val prefs = context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE)
+        val prefs = com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1")
         prefs.edit().clear().commit()
         val seed = StudyStore(context).words.first()
         val packs = JSONObject()

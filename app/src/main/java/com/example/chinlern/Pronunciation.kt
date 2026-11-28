@@ -3,7 +3,6 @@ package com.example.chinlern
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
-import android.net.Uri
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import java.util.Locale
@@ -13,7 +12,7 @@ class Pronunciation(private val activity: Activity, private val status: (String?
     private var tts: TextToSpeech? = null
     private var ready = false
     private var initialized = false
-    private var pendingDevice: Pair<Word, Boolean>? = null
+    private var pendingDevice: Pair<String, Boolean>? = null
     private var closed = false
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private var pendingHanping: Runnable? = null
@@ -31,7 +30,7 @@ class Pronunciation(private val activity: Activity, private val status: (String?
             status(if (ready) null else "Китайский голос недоступен. Добавьте его в настройках озвучивания или выберите Hanping.")
             val waiting = pendingDevice
             pendingDevice = null
-            if (ready && waiting != null) play(waiting.first, "system", waiting.second)?.let(status)
+            if (ready && waiting != null) playText(waiting.first, waiting.second)?.let(status)
         }
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) = Unit
@@ -60,15 +59,23 @@ class Pronunciation(private val activity: Activity, private val status: (String?
             }
             return launchHanping(word)
         }
+        return playText(word.hanzi, slow)
+    }
+
+    internal fun playText(text: String, slow: Boolean): String? {
+        if (closed) return null
         pendingHanping?.let { handler.removeCallbacks(it) }; pendingHanping = null
+        if (text.length > TextToSpeech.getMaxSpeechInputLength()) {
+            return "Этот фрагмент слишком длинный для озвучивания."
+        }
         if (!initialized) {
-            pendingDevice = word to slow
+            pendingDevice = text to slow
             status("Подготавливаем китайский голос…")
             return null
         }
         if (!ready) return "Китайский голос ещё не готов или не установлен. Откройте настройки озвучивания."
         tts?.setSpeechRate(if (slow) 0.65f else 0.9f)
-        return if (tts?.speak(word.hanzi, TextToSpeech.QUEUE_FLUSH, null, "chinlearn-word") == TextToSpeech.SUCCESS) null
+        return if (tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "chinlearn-device") == TextToSpeech.SUCCESS) null
         else "Не удалось воспроизвести звук. Проверьте настройки голоса."
     }
     private fun launchHanping(word: Word): String? {
@@ -87,12 +94,6 @@ class Pronunciation(private val activity: Activity, private val status: (String?
             } catch (_: ActivityNotFoundException) { "Hanping не найден. Установите его или выберите системный голос." }
             catch (_: SecurityException) { "Эта версия Hanping не разрешает внешний запуск звука. Выберите системный голос." }
     }
-    fun lookup(word: Word, pleco: Boolean): String? = try {
-        val uri = if (pleco) "plecoapi://x-callback-url/s?q=${Uri.encode(word.hanzi)}" else "hanping://search?text=${Uri.encode(word.hanzi)}"
-        activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(uri)).setPackage(if (pleco) "com.pleco.chinesesystem" else "com.embermitre.hanping.app.pro"))
-        null
-    } catch (_: ActivityNotFoundException) { "Словарь не установлен." }
-      catch (_: SecurityException) { "Не удалось открыть словарь." }
     fun stop() { pendingDevice = null; pendingHanping?.let { handler.removeCallbacks(it) }; pendingHanping = null; tts?.stop() }
     fun close() { closed = true; stop(); tts?.shutdown() }
 }

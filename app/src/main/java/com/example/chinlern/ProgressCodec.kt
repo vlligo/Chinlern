@@ -52,7 +52,7 @@ object ProgressCodec {
             // Compact positional records keep per-skill histories bounded in the existing snapshot format.
             JSONArray(listOf(it.id, it.at, it.rating, it.elapsedDays))
         }))
-    private fun readMemory(j: JSONObject): Fsrs.Memory {
+    internal fun readMemory(j: JSONObject): Fsrs.Memory {
         require(j.getInt("version") == 6) { "Неподдерживаемая версия расписания повторений." }
         val history = j.getJSONArray("history")
         require(history.length() <= Fsrs.HISTORY_LIMIT) { "Слишком длинная история повторений." }

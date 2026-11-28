@@ -11,7 +11,7 @@ import org.junit.Test
 class OverviewTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
-    private val prefs get() = context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE)
+    private val prefs get() = com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1")
 
     @Before fun reset() { prefs.edit().clear().commit() }
 

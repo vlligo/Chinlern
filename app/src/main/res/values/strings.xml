@@ -1,1 +1,8 @@
-<resources><string name="app_name">Chinlearn</string></resources>
+<resources>
+    <string name="app_name">Chinlearn</string>
+    <string name="reader_sentence_practice">Чтение по предложениям</string>
+    <string name="reader_sentence_position">Предложение %1$d из %2$d</string>
+    <string name="reader_learn_text">Учить текст</string>
+    <string name="reader_learn_named_text">Учить текст «%1$s»</string>
+    <string name="reader_fragment_position">Фрагмент %1$d из %2$d</string>
+</resources>

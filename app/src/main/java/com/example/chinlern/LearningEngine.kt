@@ -156,18 +156,28 @@ class LearningEngine(val progress: MutableMap<String, Progress> = mutableMapOf()
 
     private fun buildTasks(words: List<Word>, writing: Boolean, audio: Boolean): List<Task> {
         if (writing) return words.map { Task(it.id, Skill.WRITING) }
-        val sounds = words.groupingBy { Answers.pronunciationKey(it) }.eachCount()
+        val readings = words.map(Answers::pronunciationKey)
+        val sounds = readings.groupingBy { it }.eachCount()
+        val normalizedMeanings = words.map { word -> word.meanings.map(Answers::meaning) }
         val meanings = mutableMapOf<String, MutableSet<String>>()
-        words.forEach { w -> w.meanings.forEach { meanings.getOrPut(Answers.meaning(it)) { mutableSetOf() }.add(w.id) } }
-        return words.flatMap { word ->
-        val homophone = (sounds[Answers.pronunciationKey(word)] ?: 0) > 1
-        val sameMeaning = word.meanings.any { (meanings[Answers.meaning(it)]?.size ?: 0) > 1 }
-        Skill.entries.filter { skill ->
-            if (writing) skill == Skill.WRITING else skill != Skill.WRITING &&
-                (audio || skill !in listOf(Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER)) &&
-                (!homophone || skill !in listOf(Skill.PINYIN_MEANING, Skill.PINYIN_CHARACTER, Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER)) &&
-                (!sameMeaning || skill !in listOf(Skill.MEANING_PINYIN, Skill.MEANING_CHARACTER))
-        }.map { Task(word.id, it) }
+        words.forEachIndexed { index, word ->
+            normalizedMeanings[index].forEach { meanings.getOrPut(it) { mutableSetOf() }.add(word.id) }
+        }
+        return buildList {
+            words.forEachIndexed { index, word ->
+                val homophone = sounds.getValue(readings[index]) > 1
+                val sameMeaning = normalizedMeanings[index].any { meanings.getValue(it).size > 1 }
+                for (skill in Skill.entries) {
+                    val allowed = when (skill) {
+                        Skill.WRITING -> false
+                        Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER -> audio && !homophone
+                        Skill.PINYIN_MEANING, Skill.PINYIN_CHARACTER -> !homophone
+                        Skill.MEANING_PINYIN, Skill.MEANING_CHARACTER -> !sameMeaning
+                        else -> true
+                    }
+                    if (allowed) add(Task(word.id, skill))
+                }
+            }
         }
     }
     /** Due means wall-clock due, independent of the session and the learned indicator. */

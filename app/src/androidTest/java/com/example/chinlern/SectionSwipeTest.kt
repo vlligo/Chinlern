@@ -37,7 +37,7 @@ class SectionSwipeTest {
 
     @Before fun fixture() {
         val context = instrumentation.targetContext
-        context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit()
+        com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit()
         StudyStore(context).apply { onboardingDone = true; route = "learn"; save() }
     }
 

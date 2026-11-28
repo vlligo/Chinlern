@@ -1,14 +1,27 @@
 package com.example.chinlern
 
 import android.content.Context
+import android.content.SharedPreferences
+import com.example.chinlern.data.VocabularyReference
+import com.example.chinlern.dictionary.DictionaryBookmarks
+import com.example.chinlern.texts.TextLibrary
+import com.example.chinlern.texts.TextRecall
+import com.example.chinlern.texts.TextSync
 import org.json.JSONArray
 import org.json.JSONObject
 
 class StudyStore(context: Context, userId: String? = null, private val clock: () -> Long = System::currentTimeMillis) {
     val syncAccess = SyncAccess(context, userId)
     private val prefs = profilePreferences(context, userId).also { BookExamples.migrate(context, it) }
-    private val packs = JSONObject(prefs.getString("packs", "{}")!!)
+    val textLibrary = com.example.chinlern.texts.TextLibrary(prefs)
+    internal val textRecall = TextRecall(prefs, textLibrary, clock)
+    internal val dictionaryBookmarks = DictionaryBookmarks(prefs)
+    private val libraryRepository = com.example.chinlern.data.PreferencesLibraryRepository(prefs)
+    private val packs = JSONObject(libraryRepository.readEncoded())
     var onSyncDataChanged: (() -> Unit)? = null
+    private val textSyncListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (TextSync.isDataKey(key)) onSyncDataChanged?.invoke()
+    }
     private var lastSyncSnapshot = ""
     private var encodedVocabulary: Pair<List<Word>, String>? = null
     private var indexedVocabulary: Map<String, String>? = null
@@ -28,7 +41,8 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         if (vocabulary != indexedVocabulary) {
             decodedVocabulary.keys.retainAll(vocabulary.values.toSet())
             wordIndex = vocabulary.flatMap { (id, text) ->
-                decodedWords(text).map { SharedWords.identity(it) to MixedStudy.Origin(id, it.id) }
+                val cards = if (id == activePackId) words else decodedWords(text)
+                cards.map { SharedWords.identity(it) to MixedStudy.Origin(id, it.id) }
             }.groupBy({ it.first }, { it.second })
             indexedVocabulary = vocabulary
             introductionKeys.keys.retainAll(wordIndex.keys)
@@ -217,6 +231,7 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
     val selectedStudyWords: List<Word> get() = selectionStudy()?.words ?: words.filter { it.id in selected }
     val studyWords: List<Word> get() {
         mixedStudy()?.let { return it.words }
+        if (selectedReview) return selectedStudyWords
         val focus = if (shortSession) session.optJSONArray("tasks")?.strings()?.mapNotNull { parseTask(it)?.wordId }?.toSet() else null
         return words.filter { if (focus == null) it.id in selected else it.id in focus }
     }
@@ -252,6 +267,10 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
     var session = JSONObject(prefs.getString("shortSession", "{}")!!)
         private set
     val packReview get() = session.optBoolean("packReview")
+    // Older ranked sessions have no selection flag and retain their original pack scope.
+    val selectedReview get() = session.optBoolean("selectedReview")
+    private val usesWholePacks get() = packReview && !selectedReview
+    val hardReviewPackIds get() = session.optJSONArray("reviewPacks")?.strings()?.toSet()
     val shortSession get() = session.optBoolean("active")
     // Older extra-learning sessions stored "balanced"; resume them with normal scheduling too.
     val sessionUsesSchedule get() = session.optBoolean("scheduled", session.optBoolean("balanced"))
@@ -277,8 +296,8 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         clearQuestion()
         studyEngine.previous = null
         // A fresh session must never reset memory strength, learning steps or real due times.
-        if (restartShort) beginSession(timed, focus, scheduled, packReview)
-        else { session = JSONObject(); practiceDay = today(); touchPractice(); save() }
+        if (restartShort) beginSession(timed, focus, scheduled, packReview, hardReviewPackIds, selectedReview)
+        else { save(); session = JSONObject(); mixed = null; practiceDay = today(); touchPractice(); save() }
         return true
     }
     private fun touchPractice() {
@@ -340,8 +359,10 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
             else false
         }
     }
-    fun beginSession(minutes: Boolean = false, focus: List<Task>? = null, scheduled: Boolean = false, packReview: Boolean = false) {
-        if (packReview && mixed != null) { save(); mixed = null }
+    fun beginSession(minutes: Boolean = false, focus: List<Task>? = null, scheduled: Boolean = false, packReview: Boolean = false,
+        reviewPacks: Set<String>? = null, selectedReview: Boolean = false
+    ) {
+        if (packReview || this.packReview) { save(); mixed = null }
         practiceDay = today()
         touchPractice()
         clearQuestion()
@@ -353,14 +374,17 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         session = JSONObject().put("active", true).put("limit", limit)
             .put("until", if (minutes) clock() + 300_000L else 0L)
             .put("packReview", packReview).put("count", 0).put("correct", 0).put("scheduled", scheduled)
+        reviewPacks?.let { session.put("reviewPacks", JSONArray(it.sorted())) }
+        if (selectedReview) session.put("selectedReview", true)
         focus?.let { session.put("tasks", JSONArray(it.map { task -> task.key })) }
         save()
     }
     fun endSession() { session.put("finished", true); clearQuestion(); save() }
-    fun leaveSession() { session = JSONObject(); clearQuestion(); save() }
+    fun leaveSession() { save(); session = JSONObject(); mixed = null; clearQuestion(); save() }
 
 
     init {
+        prefs.registerOnSharedPreferenceChangeListener(textSyncListener)
         if (userId != null && lastSyncedAt > 0) syncAccess.rememberPreviousAccess()
         if (!packs.has(activePackId)) packs.put(activePackId, JSONObject().put("name", "Мои слова"))
         words = try { decodedWords(prefs.getString("words", null) ?: seedJson).toMutableList() }
@@ -409,13 +433,53 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
             members.forEach { introductions.remove("${it.packId}/${it.wordId}") }
         }
     }
-    private fun mixedStudy(): MixedStudy? = if (packReview) null else selectionStudy()
+    private fun mixedStudy(): MixedStudy? {
+        if (!usesWholePacks) return selectionStudy()
+        val ids = session.optJSONArray("reviewPacks")?.strings()?.toSet() ?: return null
+        return mixed ?: reviewStudy(ids).also { mixed = it }
+    }
+
+    private fun reviewStudy(ids: Set<String>): MixedStudy = MixedStudy(
+        packNames.filter { it.first in ids }.map { (id, _) ->
+            if (id == activePackId) MixedStudy.Source(id, words.toList(), words.map { it.id }.toSet(),
+                engine.progress.mapValues { it.value.copy() }, engine.step)
+            else {
+                val pack = packs.getJSONObject(id)
+                val vocabulary = decodedWords(pack.getString("words"))
+                val progress = pack.getJSONObject("progress")
+                MixedStudy.Source(id, vocabulary, vocabulary.map { it.id }.toSet(),
+                    progress.keys().asSequence().associateWith { readProgress(progress.getJSONObject(it)) }, pack.optInt("step"))
+            }
+        }
+    )
+
+    fun hardReviewTasks(packIds: Set<String>): List<Task> {
+        val review = reviewStudy(packIds)
+        return rankHardReviewWords(review.words, review.engine)
+    }
+
+    fun selectedHardReviewTasks(): List<Task> = rankHardReviewWords(selectedStudyWords, selectionEngine)
+
+    private fun rankHardReviewWords(words: List<Word>, source: LearningEngine): List<Task> {
+        val available = ListeningAvailability.filter(source.tasks(words, false, audioEnabled), words, audioProvider) +
+            source.tasks(words, true, false)
+        return hardReviewTasks(available, source)
+    }
+
+    fun beginHardReview(packIds: Set<String>, skills: Set<Skill>): Boolean {
+        require(packIds.isNotEmpty() && packIds.all { id -> visiblePackNames.any { it.first == id } })
+        save()
+        val focus = hardReviewTasks(packIds).filter { it.skill in skills }.take(10)
+        if (focus.isEmpty()) return false
+        beginSession(focus = focus, packReview = true, reviewPacks = packIds)
+        return true
+    }
     // Dashboard data can be requested while a single-pack review is paused.
     // Keep that read-only snapshot separate from the engine that flushMixed writes back.
     private var reviewSelection: MixedStudy? = null
     private fun selectionStudy(): MixedStudy? {
         if (practicePackIds.size == 1 && activePackId in practicePackIds) return null
-        (if (packReview) reviewSelection else mixed)?.let { return it }
+        (if (usesWholePacks) reviewSelection else mixed)?.let { return it }
         val sources = packNames.filter { it.first in practicePackIds }.map { (id, _) ->
             if (id == activePackId) MixedStudy.Source(id, words.toList(), selected.toSet(), engine.progress.mapValues { it.value.copy() }, engine.step)
             else {
@@ -427,7 +491,7 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         }
         return MixedStudy(sources).also {
             it.engine.previous = mixedPrevious
-            if (packReview) reviewSelection = it else mixed = it
+            if (usesWholePacks) reviewSelection = it else mixed = it
         }
     }
     private fun flushMixed() {
@@ -451,11 +515,18 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
     data class LibraryPack(val id: String, val name: String, val words: List<Word>, val selected: Set<String>,
         val recognized: Set<String>, val writable: Set<String>)
 
-    fun libraryPacks(): List<LibraryPack> {
+    /** Read all profile vocabulary without selecting packs, reconciling or saving progress. */
+    fun vocabularyLookup(): VocabularyLookup = VocabularyLookup(packNames.flatMap { (id, name) ->
+        val vocabulary = if (id == activePackId) words else decodedWords(packs.getJSONObject(id).getString("words"))
+        val label = packLabel(id, name)
+        vocabulary.map { VocabularyLookup.Entry(it, id, label) }
+    })
+
+    fun libraryPacks(packIds: Set<String> = practicePackIds): List<LibraryPack> {
         // Inspect live state without saving/serializing the entire library just to display it.
         val mixedProgress = mixed?.let { session -> session.sources.associate { it.id to session.progressFor(it) } }.orEmpty()
         val shared = sharedProgress()
-        return packNames.filter { it.first in practicePackIds }.map { (id, name) ->
+        return packNames.filter { it.first in packIds }.map { (id, name) ->
             val pack = packs.getJSONObject(id)
             val vocabulary = if (id == activePackId) words.toList() else decodedWords(pack.getString("words"))
             val liveProgress = mixedProgress[id] ?: if (id == activePackId) engine.progress else null
@@ -644,10 +715,10 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         progress.keys().forEach { engine.progress[it] = readProgress(progress.getJSONObject(it)) }
         engine.step = active.getInt("step")
         engine.previous = if (undo.isNull("activePrevious")) null else parseTask(undo.getString("activePrevious"))
-        if (!packReview) mixedPrevious = if (undo.isNull("previous")) null else parseTask(undo.getString("previous"))
+        if (!usesWholePacks) mixedPrevious = if (undo.isNull("previous")) null else parseTask(undo.getString("previous"))
         if (shortSession) session.put("count", undo.optInt("sessionCount")).put("correct", undo.optInt("sessionCorrect"))
             .put("reviewed", undo.optJSONArray("sessionReviewed") ?: JSONArray())
-        if (packReview) session.put("missed", JSONArray(session.optJSONArray("missed")?.strings().orEmpty() - key))
+        if (packReview) session.put("missed", JSONArray(session.optJSONArray("missed")?.strings().orEmpty() - current?.key))
         answerIgnored = true; answerUndo = null; beforeAnswer = null
         save()
         // Keep the revealed answer visible, but it can no longer be scored a second time.
@@ -673,9 +744,11 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
             it.wordId in eligible && (!shortSession || focus == null || it.key in focus)
         }
     }
-    fun hardReviewTasks(available: List<Task> = ListeningAvailability.filter(
-        engine.tasks(words, false, audioEnabled), words, audioProvider) + engine.tasks(words, true, false)
-    ): List<Task> = RecallDifficulty.rank(available.filterNot { engine.peek(it).mastered }, engine.progress)
+    fun hardReviewTasks(
+        available: List<Task> = ListeningAvailability.filter(
+            engine.tasks(words, false, audioEnabled), words, audioProvider) + engine.tasks(words, true, false),
+        source: LearningEngine = engine
+    ): List<Task> = RecallDifficulty.rank(available.filterNot { source.peek(it).mastered }, source.progress)
 
     fun missedReviewTasks(): List<Task> {
         val missed = session.optJSONArray("missed")?.strings()?.toSet().orEmpty()
@@ -706,7 +779,8 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
             val word = studyWords.first { it.id == task.wordId }
             val confused = source.peek(task).confusions.entries
                 .filter { !word.acceptsForm(it.key) }.sortedByDescending { it.value }.map { it.key }
-            val reciprocal = (mixedStudy()?.words ?: words).filter { other -> other.id != word.id &&
+            val comparisonWords = if (selectedReview) studyWords else mixedStudy()?.words ?: words
+            val reciprocal = comparisonWords.filter { other -> other.id != word.id &&
                 source.progress[Task(other.id, task.skill).key]?.confusions?.keys?.any { word.acceptsForm(it) } == true
             }.map { it.hanzi }
             val comparisons = (confused + reciprocal).filter { !word.acceptsForm(it) }.distinct()
@@ -729,7 +803,9 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
             .putString("answerUndo", answerUndo?.toString()).putBoolean("answerIgnored", answerIgnored)
             .putString("strokes", strokes).apply()
     }
-    fun save() {
+    fun save() = save(prefs.edit())
+
+    private fun save(editor: SharedPreferences.Editor, resetPractice: Boolean = false) {
         reviewSelection = null
         if (lastPracticeAt == 0L && (current != null || shortSession)) touchPractice()
         mixed?.let { mixedPrevious = it.engine.previous }
@@ -744,8 +820,9 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         // Keep practice membership in the synced pack, alongside its word checkboxes.
         packs.keys().forEach { id -> packs.getJSONObject(id).put("practice", id in practicePackIds) }
         val packData = packs.toString()
-        prefs.edit().putLong("lastPracticeAt", lastPracticeAt).putString("practiceDay", practiceDay).putString("shortSession", session.toString()).putString("introductions", introductions.toString())
-            .putString("srsRetention", desiredRetention.toString()).putBoolean("onboardingDone", onboardingDone).putInt("dailyNewWords", dailyNewWords).putStringSet("practicePacks", practicePackIds.toSet()).putString("packs", packData).putString("activePack", activePackId).putString("words", vocabulary).putStringSet("selected", selected.toSet())
+        libraryRepository.stageEncoded(editor, packData)
+            .putLong("lastPracticeAt", lastPracticeAt).putString("practiceDay", practiceDay).putString("shortSession", session.toString()).putString("introductions", introductions.toString())
+            .putString("srsRetention", desiredRetention.toString()).putBoolean("onboardingDone", onboardingDone).putInt("dailyNewWords", dailyNewWords).putStringSet("practicePacks", practicePackIds.toSet()).putString("activePack", activePackId).putString("words", vocabulary).putStringSet("selected", selected.toSet())
             .putString("progress", progressJson.toString()).putInt("step", engine.step)
             .putString("previous", engine.previous?.key).putString("mixedPrevious", mixedPrevious?.key).putBoolean("audio", audioEnabled)
             .putBoolean("speakAfterAnswer", speakAfterAnswer).putString("provider", audioProvider).putBoolean("slow", slowAudio).putBoolean("writing", writing)
@@ -757,7 +834,20 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
             .putString("answerUndo", answerUndo?.toString()).putBoolean("answerIgnored", answerIgnored)
             .putString("strokes", strokes)
             .putString("syncBase", syncBaseText()).putString("syncRevision", syncRevision)
-            .putLong("lastSyncedAt", lastSyncedAt).apply()
+            .putLong("lastSyncedAt", lastSyncedAt)
+        if (resetPractice) {
+            editor.putString("shortSession", "{}").remove("mixedPrevious").remove("current")
+                .putInt("feedback", -1).putBoolean("revealed", false).putString("draft", "")
+                .putString("tones", "").putString("choices", "[]").remove("before")
+                .remove("answerUndo").putBoolean("answerIgnored", false).putString("strokes", "")
+        }
+        editor.apply()
+        if (resetPractice) {
+            session = JSONObject()
+            mixed = null
+            mixedPrevious = null
+            clearQuestion()
+        }
         // Change detection needs only local equality. Canonicalize when sync actually runs.
         if (packData != lastSyncSnapshot) { lastSyncSnapshot = packData; onSyncDataChanged?.invoke() }
     }
@@ -782,6 +872,22 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         if (!packs.getJSONObject(activePackId).has("words") ||
             packs.keys().asSequence().any { !packs.getJSONObject(it).has("practice") }) save()
         return snapshotFromPacks()
+    }
+
+    internal val textSyncRevision: String? get() = prefs.getString("textSyncRevision", null)
+    internal fun textSyncBase(): Map<String, String> = SyncSnapshot.decode(prefs.getString("textSyncBase", "{}")!!)
+    internal fun savedTextSyncSnapshot() = TextSync.snapshot(prefs)
+
+    internal fun applyTextSync(pending: Map<String, String>, cloud: Map<String, String>, revision: String): Boolean {
+        val editor = prefs.edit().putString("textSyncBase", SyncSnapshot.encode(cloud))
+            .putString("textSyncRevision", revision)
+        val current = if (pending == cloud) null else savedTextSyncSnapshot()
+        val merged = current?.let { TextSync.merge(pending, it, cloud) }
+        val changed = current != null && merged != null && current != merged
+        if (changed) TextSync.stage(editor, current.keys, merged)
+        // Incoming data and its merge baseline must survive restart together.
+        check(editor.commit())
+        return changed
     }
 
     fun acknowledgeSync(cloud: Map<String, String>, revision: String) {
@@ -923,6 +1029,46 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
         prefs.edit().putLong("lastPracticeAt", lastPracticeAt).putString("practiceDay", practiceDay).putString("draft", draft).putString("strokes", strokes).apply()
     }
     fun replaceWord(word: Word) = replaceWords(listOf(word))
+
+    internal fun packWords(packId: String): List<Word> {
+        val pack = requireNotNull(packs.optJSONObject(packId)) { "Набор больше недоступен." }
+        return if (packId == activePackId) words.toList() else decodedWords(pack.getString("words"))
+    }
+
+    internal fun addWordToPack(packId: String, word: Word, selection: TextLibrary.Selection? = null) {
+        validate(word)
+        val existing = packWords(packId)
+        require(existing.size < 2000) { "В наборе уже 2000 слов." }
+        require(existing.none { it.hanzi == word.hanzi }) {
+            "Такая письменная форма уже есть в этом наборе. Для другого чтения или значения выберите другой набор."
+        }
+        val editor = prefs.edit()
+        if (selection != null) textLibrary.stageAnnotation(editor, selection, VocabularyReference(packId, word.id))
+        val pack = packs.getJSONObject(packId)
+        require(existing.none { it.id == word.id }) { "Карточка с таким id уже есть в наборе." }
+        if (packId == activePackId) {
+            words.add(word)
+            selected.add(word.id)
+        } else {
+            val updatedPack = JSONObject(pack.toString())
+            updatedPack.put("words", encodeWords(existing + word))
+            updatedPack.getJSONArray("selected").put(word.id)
+            packs.put(packId, updatedPack)
+        }
+        try {
+            save(editor, resetPractice = true)
+        } catch (error: Exception) {
+            // Restore the vocabulary snapshot if the atomic card/context write failed.
+            if (packId == activePackId) {
+                words.removeAll { it.id == word.id }
+                selected.remove(word.id)
+                pack.put("words", encodedWords()).put("selected", JSONArray(selected.toList()))
+            }
+            packs.put(packId, pack)
+            throw error
+        }
+    }
+
     fun replaceWords(incoming: List<Word>) {
         invalidatePractice()
         incoming.forEach { validate(it) }
@@ -1033,10 +1179,16 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
 
     companion object {
         val characterSkills = setOf(Skill.MEANING_CHARACTER, Skill.PINYIN_CHARACTER, Skill.AUDIO_CHARACTER)
+        private val defaultDistractorForms = listOf("水", "火", "木", "人", "口", "日", "月", "山")
+
+        internal fun suggestDistractors(form: String, alternatives: List<String>, forms: List<String>): List<String> =
+            (forms.sortedBy { kotlin.math.abs(it.length - form.length) } + defaultDistractorForms)
+                .asSequence().filter { it.isNotBlank() && it != form && it !in alternatives }.distinct().take(5).toList()
+
         private fun profilePreferences(context: Context, userId: String?): android.content.SharedPreferences {
-            val guest = context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE)
+            val guest = com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1")
             if (userId == null) return guest
-            val profile = context.getSharedPreferences("chinlearn_user_$userId", Context.MODE_PRIVATE)
+            val profile = com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_user_$userId")
             val registry = context.getSharedPreferences("chinlearn_profiles", Context.MODE_PRIVATE)
             // Existing local data joins the first account only. Other accounts have isolated stores.
             if (!profile.contains("packs") && !registry.contains("guestTransferredTo")) {
@@ -1115,7 +1267,7 @@ class StudyStore(context: Context, userId: String? = null, private val clock: ()
                 }
                 val word = Word(j.optString("id", j.getString("hanzi")), j.getString("hanzi").trim(),
                     j.getString("pinyin").trim(), j.optString("numbered", j.getString("pinyin")).trim(), j.getJSONArray("meanings").strings().map { it.trim() }.filter { it.isNotEmpty() },
-                    (j.optJSONArray("distractors")?.strings() ?: ((0 until arr.length()).map { arr.optJSONObject(it)?.optString("hanzi").orEmpty() } + listOf("水", "火", "木", "人", "口", "日", "月", "山"))).map { it.trim() }.filter { it.isNotEmpty() && it != j.getString("hanzi") && it !in (j.optJSONArray("alternatives")?.strings() ?: emptyList()) }.distinct().take(5), j.optString("hint"),
+                    (j.optJSONArray("distractors")?.strings() ?: ((0 until arr.length()).map { arr.optJSONObject(it)?.optString("hanzi").orEmpty() } + defaultDistractorForms)).map { it.trim() }.filter { it.isNotEmpty() && it != j.getString("hanzi") && it !in (j.optJSONArray("alternatives")?.strings() ?: emptyList()) }.distinct().take(5), j.optString("hint"),
                     j.optJSONArray("alternatives")?.strings()?.map { it.trim() }?.filter { it.isNotEmpty() }?.distinct() ?: emptyList(),
                     j.optString("example").trim(), j.optString("examplePinyin").trim(), j.optString("exampleTranslation").trim())
                 validate(word)

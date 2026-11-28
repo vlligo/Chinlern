@@ -3,8 +3,8 @@ package com.example.chinlern
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
 import android.os.Bundle
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -17,6 +17,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.webkit.WebViewAssetLoader
+import com.example.chinlern.WordCardUi.dp
 import com.google.android.material.appbar.MaterialToolbar
 import org.json.JSONArray
 import org.json.JSONObject
@@ -31,7 +32,7 @@ class StrokeOrderActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val paper = Color.rgb(249, 246, 238)
+        val paper = getColor(R.color.chinlern_paper)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(paper)
@@ -43,12 +44,17 @@ class StrokeOrderActivity : AppCompatActivity() {
         }
         root.addView(MaterialToolbar(this).apply {
             title = "Порядок черт"
-            setTitleTextColor(Color.rgb(36, 75, 68))
+            setTitleTextColor(getColor(R.color.chinlern_ink))
             setNavigationIcon(R.drawable.ic_stroke_back)
+            setNavigationIconTint(getColor(R.color.chinlern_jade))
             navigationContentDescription = "Закрыть порядок черт"
             setNavigationOnClickListener { finish() }
-            setBackgroundColor(paper)
-        }, LinearLayout.LayoutParams(-1, (56 * resources.displayMetrics.density).toInt()))
+            setBackgroundColor(getColor(R.color.chinlern_reading_surface))
+        }, LinearLayout.LayoutParams(-1, dp(56)))
+        root.addView(View(this).apply {
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            setBackgroundColor(getColor(R.color.chinlern_gold))
+        }, -1, dp(1))
         setContentView(root)
 
         val forms = intent.getStringArrayListExtra(FORMS).orEmpty()
@@ -67,7 +73,7 @@ class StrokeOrderActivity : AppCompatActivity() {
                 text = "Не удалось открыть порядок черт. Закройте экран и попробуйте снова."
                 textSize = 18f
                 setPadding(24, 24, 24, 24)
-                setTextColor(Color.rgb(43, 48, 43))
+                setTextColor(getColor(R.color.chinlern_ink))
             })
         }
         web = WebView(this).apply {

@@ -1,0 +1,12 @@
+{
+  "schema": 2,
+  "source_dump": "2026-11-01",
+  "extracted": "2026-11-02",
+  "entries": 10507,
+  "articles": 10507,
+  "readings": 7927,
+  "source_sha256": "fdbae86c624a953ac1289ed671122a31d55a354933239858ca273b3e6395a45c",
+  "upstream_sha256": "63fa48a5e383cfbb7c99708aae89c3042bc9687938b9cb0265af9c6d3d1c189e",
+  "database_sha256": "0c0656be02a4106d4e459d8f37e67ca77e71b0f9bbf7cb22cbe30495d9e3dadc",
+  "database_bytes": 2088960
+}

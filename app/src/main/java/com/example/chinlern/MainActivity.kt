@@ -1,5 +1,9 @@
 package com.example.chinlern
 
+import android.animation.ObjectAnimator
+import android.animation.PropertyValuesHolder
+import android.animation.StateListAnimator
+import android.animation.ValueAnimator
 import android.content.ClipData
 import android.content.Intent
 import android.content.res.ColorStateList
@@ -7,7 +11,11 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
 import android.os.Bundle
+import android.os.CancellationSignal
+import android.os.Handler
+import android.os.Looper
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.style.BackgroundColorSpan
@@ -26,12 +34,24 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.graphics.ColorUtils
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.doOnPreDraw
 import androidx.core.widget.doAfterTextChanged
+import androidx.interpolator.view.animation.FastOutSlowInInterpolator
 import androidx.viewpager.widget.PagerAdapter
 import androidx.viewpager.widget.ViewPager
+import com.example.chinlern.data.VocabularyReference
+import com.example.chinlern.dictionary.DictionaryResult
+import com.example.chinlern.dictionary.DictionaryScreen
+import com.example.chinlern.dictionary.SourcedDefinition
+import com.example.chinlern.dictionary.dictionaryReadingKey
+import com.example.chinlern.dictionary.dictionaryResults
+import com.example.chinlern.dictionary.readingLabel
+import com.example.chinlern.dictionary.OfflineDictionary
+import com.example.chinlern.dictionary.Pinyin
+import com.example.chinlern.texts.ReaderDialogs
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -46,10 +66,19 @@ import com.google.firebase.FirebaseNetworkException
 import java.text.DateFormat
 import java.util.Date
 import java.util.UUID
+import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
     private lateinit var store: StudyStore
     private lateinit var voice: Pronunciation
+    private var readerDialogs: ReaderDialogs? = null
+    private val dictionaryScreens = mutableListOf<DictionaryScreen>()
+    private val librarySearchWorker = Executors.newSingleThreadExecutor()
+    private val librarySearchHandler = Handler(Looper.getMainLooper())
+    private val libraryDictionaries by lazy {
+        listOf(OfflineDictionary.Source.RU_WIKTIONARY, OfflineDictionary.Source.CEDICT).map { OfflineDictionary(this, it) }
+    }
+    private var cancelLibrarySearch: (() -> Unit)? = null
     private val auth by lazy { FirebaseAuth.getInstance() }
     private var cloud: CloudSync? = null
     private var profileUid: String? = null
@@ -119,15 +148,15 @@ class MainActivity : AppCompatActivity() {
     private var wideContent = false
     private var contentWidthDp = 0
     private var selectionLabel: TextView? = null
-    private val jade = Color.rgb(36, 75, 68)
-    private val ink = Color.rgb(43, 48, 43)
-    private val muted = Color.rgb(105, 109, 99)
-    private val paper = Color.rgb(249, 246, 238)
-    private val pale = Color.rgb(234, 239, 228)
+    private val jade by lazy { getColor(R.color.chinlern_jade) }
+    private val ink by lazy { getColor(R.color.chinlern_ink) }
+    private val muted by lazy { getColor(R.color.chinlern_muted) }
+    private val paper by lazy { getColor(R.color.chinlern_paper) }
+    private val pale by lazy { getColor(R.color.chinlern_pale_jade) }
     private val orange = Color.rgb(152, 83, 36)
-    private val red = Color.rgb(159, 41, 54)
-    private val gold = Color.rgb(173, 126, 41)
-    private val blush = Color.rgb(247, 232, 225)
+    private val red by lazy { getColor(R.color.chinlern_red) }
+    private val gold by lazy { getColor(R.color.chinlern_gold) }
+    private val blush by lazy { getColor(R.color.chinlern_blush) }
     private val importFile = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) readPackFiles(uris.distinct())
     }
@@ -256,10 +285,25 @@ class MainActivity : AppCompatActivity() {
         connectCloud()
         voice = Pronunciation(this, { error -> voiceMessage = error; audioNotice?.text = error ?: "Китайский голос готов" })
         onBackPressedDispatcher.addCallback(this, backCallback)
+        libraryCardFilter = savedInstanceState?.takeIf { it.getString("dictionaryProfile") == profileUid }
+            ?.getString("libraryCardFilter").orEmpty()
         render()
+        savedInstanceState?.takeIf { it.getString("readerProfile") == profileUid }?.let { state ->
+            state.getString("readerDocument")?.let { id ->
+                reader().restore(id, state.getInt("readerRevision"), state.getInt("readerOffset"),
+                    state.getString("readerRevisionId"))
+            }
+        }
+        savedInstanceState?.takeIf { it.getString("dictionaryProfile") == profileUid }?.let { state ->
+            val source = OfflineDictionary.Source.entries.firstOrNull { it.id == state.getString("dictionarySource") }
+            state.getString("dictionaryQuery")?.let { vocabularySearch(it, source) }
+        }
         authListener = FirebaseAuth.AuthStateListener { firebase ->
             val nextUid = firebase.currentUser?.uid
             if (nextUid != profileUid) {
+                dictionaryScreens.toList().asReversed().forEach(DictionaryScreen::close)
+                readerDialogs?.close(); readerDialogs = null
+                libraryCardFilter = ""
                 cloud?.close(); cloud = null
                 store.save()
                 accessRestoreUid = null
@@ -282,12 +326,36 @@ class MainActivity : AppCompatActivity() {
     }
     override fun onPause() {
         backMotion.reset()
+        readerDialogs?.savePosition()
         pendingListening?.let { window.decorView.removeCallbacks(it) }; pendingListening = null
         // Hanping briefly opens an external activity. Do not replay again on its return.
         if (::store.isInitialized && store.audioProvider != "hanping") lastListeningPrompt = null
         super.onPause(); if (::store.isInitialized) store.save(); cloud?.sync(); if (::voice.isInitialized) voice.stop()
     }
+    override fun onSaveInstanceState(outState: Bundle) {
+        if (libraryCardFilter.isNotEmpty()) {
+            outState.putString("dictionaryProfile", profileUid)
+            outState.putString("libraryCardFilter", libraryCardFilter)
+        }
+        super.onSaveInstanceState(outState)
+        dictionaryScreens.lastOrNull()?.currentQuery()?.let { query ->
+            outState.putString("dictionaryProfile", profileUid)
+            outState.putString("dictionaryQuery", query)
+            outState.putString("dictionarySource", dictionaryScreens.lastOrNull()?.selectedSource?.id)
+        }
+        readerDialogs?.currentReading()?.let { (document, offset) ->
+            outState.putString("readerProfile", profileUid)
+            outState.putString("readerDocument", document.id)
+            outState.putInt("readerRevision", document.revision)
+            outState.putString("readerRevisionId", document.revisionId)
+            outState.putInt("readerOffset", offset)
+        }
+    }
     override fun onDestroy() {
+        cancelLibrarySearch?.invoke()
+        librarySearchWorker.shutdownNow()
+        dictionaryScreens.toList().asReversed().forEach(DictionaryScreen::close)
+        readerDialogs?.close()
         authListener?.let { auth.removeAuthStateListener(it) }
         cloud?.close()
         if (::voice.isInitialized) voice.close()
@@ -298,7 +366,7 @@ class MainActivity : AppCompatActivity() {
         cloud?.close(); cloud = null
         syncStatus = when {
             !store.syncAccess.enabled -> "Синхронизация выключена — данные сохраняются на устройстве"
-            profileUid == null -> "Войдите, чтобы синхронизировать наборы и прогресс"
+            profileUid == null -> "Войдите, чтобы синхронизировать наборы, тексты и прогресс"
             auth.currentUser?.isEmailVerified != true -> "Подтвердите почту, чтобы начать синхронизацию"
             else -> "Ожидание синхронизации…"
         }
@@ -328,7 +396,10 @@ class MainActivity : AppCompatActivity() {
             syncStatus = status
             syncStatusLabel?.text = status
         }, { _, changed ->
-            if (changed && store.route != "quiz") render()
+            if (changed) {
+                readerDialogs?.refreshAfterSync()
+                if (store.route != "quiz") render()
+            }
         }) }
     }
 
@@ -353,18 +424,21 @@ class MainActivity : AppCompatActivity() {
         setOnClickListener { action() }
     }
     private fun listIcon(icon: Int, description: String, action: () -> Unit) =
-        androidx.appcompat.widget.AppCompatImageButton(this).apply {
-            setImageResource(icon)
-            imageTintList = ColorStateList.valueOf(muted)
-            scaleType = ImageView.ScaleType.CENTER_INSIDE
-            setPadding(dp(14), dp(14), dp(14), dp(14))
-            val ripple = android.util.TypedValue()
-            theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, ripple, true)
-            setBackgroundResource(ripple.resourceId)
-            contentDescription = description
-            androidx.appcompat.widget.TooltipCompat.setTooltipText(this, description)
-            setOnClickListener { action() }
-        }
+        DetailUi.icon(this, icon, description, R.color.chinlern_muted, action)
+
+    private fun LinearLayout.addWithIcon(control: View, icon: View, top: Int) {
+        val line = row()
+        line.addView(control, LinearLayout.LayoutParams(0, -2, 1f))
+        line.addView(icon, LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginStart = dp(6) })
+        add(line, top)
+    }
+
+    private fun LinearLayout.addIcon(icon: View, top: Int, alignment: Int = Gravity.START) {
+        addView(icon, LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+            topMargin = dp(top)
+            gravity = alignment
+        })
+    }
     private fun card(color: Int = Color.WHITE) = column().apply { background = bg(color, 18).apply { if (color == Color.WHITE) setStroke(dp(1), Color.rgb(231, 224, 209)) }; setPadding(dp(22), dp(22), dp(22), dp(22)) }
     private fun LinearLayout.twoButtons(first: MaterialButton, second: MaterialButton) {
         if (resources.configuration.fontScale > 1.2f || (!wideContent && (first.text.length > 12 || second.text.length > 12))) {
@@ -392,7 +466,7 @@ class MainActivity : AppCompatActivity() {
         if (store.route == "quiz" || route !in navigationRoutes) {
             store.route = route; render(); return
         }
-        val motion = android.os.Build.VERSION.SDK_INT < 26 || android.animation.ValueAnimator.areAnimatorsEnabled()
+        val motion = android.os.Build.VERSION.SDK_INT < 26 || ValueAnimator.areAnimatorsEnabled()
         pageHost.setCurrentItem(navigationRoutes.indexOf(route), motion)
     }
 
@@ -521,10 +595,10 @@ class MainActivity : AppCompatActivity() {
                 railItems.forEach { (destination, item) ->
                     val selected = destination == route
                     item.isSelected = selected
-                    item.backgroundTintList = ColorStateList.valueOf(if (selected) blush else Color.TRANSPARENT)
+                    item.setTypeface(item.typeface, if (selected) Typeface.BOLD else Typeface.NORMAL)
                     item.setTextColor(if (selected) red else muted)
                 }
-                selectionLabel?.text = "${if (route in listOf("learn", "words")) store.selectedStudyWords.size else store.selected.size} слов"
+                selectionLabel?.text = "${if (route == "settings") store.selected.size else store.selectedStudyWords.size} слов"
             }
         })
         if (initialRoute != "quiz") warmSectionsAfterDraw()
@@ -557,7 +631,7 @@ class MainActivity : AppCompatActivity() {
         when (route) { "quiz" -> quiz(); "words" -> library(); "stats" -> stats(); "settings" -> settings(); else -> dashboard() }
     }
 
-    private fun installSectionList(route: String, adapter: BaseAdapter, footer: View? = null) {
+    private fun installSectionList(route: String, adapter: BaseAdapter, footer: View? = null, searchBar: View? = null) {
         // The header and cards share one bounded scrolling surface. Offscreen rows are recycled.
         pageHolder.removeView(content)
         pageScroll.visibility = View.GONE
@@ -573,9 +647,17 @@ class MainActivity : AppCompatActivity() {
             this.adapter = adapter
         }
         sectionList = list
-        pageFrame.addView(list, FrameLayout.LayoutParams(
+        val listContent = if (searchBar == null) list else column().apply {
+            addView(searchBar, LinearLayout.LayoutParams(-1, -2))
+            addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
+        }
+        pageFrame.addView(listContent, FrameLayout.LayoutParams(
             if (contentWidthDp >= 1040) dp(1088) else -1, -1, Gravity.CENTER_HORIZONTAL))
-        listScrollPositions[route]?.let { (row, top) -> list.setSelectionFromTop(row.coerceAtMost(list.count - 1), top) }
+        // In non-touch mode ListView otherwise skips the non-selectable header,
+        // hiding search/reader actions completely when large fonts make it tall.
+        list.requestFocusFromTouch()
+        val (row, top) = listScrollPositions[route] ?: (0 to 0)
+        list.setSelectionFromTop(row.coerceAtMost(list.count - 1), top)
     }
 
     private fun render() {
@@ -599,6 +681,8 @@ class MainActivity : AppCompatActivity() {
             ViewCompat.requestApplyInsets(pageFrame.rootView)
             return
         }
+        cancelLibrarySearch?.invoke()
+        cancelLibrarySearch = null
         val config = resources.configuration
         val windowWidth = config.screenWidthDp
         tablet = if (store.route == "quiz") StudyLayout.expanded(windowWidth, config.screenHeightDp, config.smallestScreenWidthDp)
@@ -618,9 +702,9 @@ class MainActivity : AppCompatActivity() {
             setImageResource(R.drawable.brand_mark)
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginEnd = dp(12) })
-        val brand = column().apply { add(label("Chinlearn", 20f, ink, true)); add(label("Китайские слова", 12f, muted)) }
+        val brand = label("Chinlearn", 20f, ink, true)
         header.addView(brand, LinearLayout.LayoutParams(0, -2, 1f))
-        selectionLabel = label("${when (store.route) { "quiz" -> store.studyWords.size; "learn", "words" -> store.selectedStudyWords.size; else -> store.selected.size }} слов", 13f, jade)
+        selectionLabel = label("${when (store.route) { "quiz" -> store.studyWords.size; "settings" -> store.selected.size; else -> store.selectedStudyWords.size }} слов", 13f, jade)
         header.addView(selectionLabel)
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
@@ -628,9 +712,22 @@ class MainActivity : AppCompatActivity() {
             if (!tablet && store.route == "quiz") {
                 v.findViewWithTag<View>("quizSessionBar")?.visibility = if (keyboard.bottom > 0) View.GONE else View.VISIBLE
             }
-            header.visibility = if (store.route == "quiz" && (!tablet || keyboard.bottom > 0)) View.GONE else View.VISIBLE
+            val typing = keyboard.bottom > 0
+            header.visibility = if ((store.route == "quiz" && (!tablet || typing)) ||
+                (typing && config.screenHeightDp < 480)) View.GONE else View.VISIBLE
+            bottomNavigation?.let { nav ->
+                val visibility = if (typing) View.GONE else View.VISIBLE
+                if (nav.visibility != visibility) {
+                    nav.visibility = visibility
+                    setNavigationClearance(if (typing) 0 else nav.height + dp(16))
+                }
+            }
             keyboardQuestion.visibility = if (tablet && store.route == "quiz" && keyboard.bottom > 0 && keyboardQuestion.childCount > 0) View.VISIBLE else View.GONE
-            v.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, keyboard.bottom))
+            val bottom = maxOf(bars.bottom, keyboard.bottom)
+            if (v.paddingLeft != bars.left || v.paddingTop != bars.top ||
+                v.paddingRight != bars.right || v.paddingBottom != bottom) {
+                v.setPadding(bars.left, bars.top, bars.right, bottom)
+            }
             WindowInsetsCompat.CONSUMED
         }
         root.add(header)
@@ -644,7 +741,8 @@ class MainActivity : AppCompatActivity() {
                 val item = button(title) { switchDestination(route) }.apply {
                     textSize = 14f; setPadding(dp(6), dp(10), dp(6), dp(10))
                     isSelected = selected
-                    backgroundTintList = ColorStateList.valueOf(if (selected) blush else Color.TRANSPARENT)
+                    backgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
+                    setTypeface(typeface, if (selected) Typeface.BOLD else Typeface.NORMAL)
                     setTextColor(if (selected) red else muted)
                     icon = androidx.appcompat.content.res.AppCompatResources.getDrawable(this@MainActivity,
                         when (route) { "words" -> R.drawable.ic_nav_words; "stats" -> R.drawable.ic_nav_stats; "settings" -> R.drawable.ic_nav_settings; else -> R.drawable.ic_nav_learn })
@@ -684,9 +782,12 @@ class MainActivity : AppCompatActivity() {
             visibility = View.GONE
             setPadding(dp(if (tablet) 24 else 18), dp(6), dp(if (tablet) 24 else 18), dp(8))
             setBackgroundColor(Color.WHITE)
+        }
+        quizDock = QuizActionDock(this).apply {
+            addView(StudyLayout.centered(quizActions, 1088))
+            setBackgroundColor(Color.WHITE)
             elevation = dp(4).toFloat()
         }
-        quizDock = QuizActionDock(this).apply { addView(quizActions); setBackgroundColor(Color.WHITE) }
         workspace.add(quizDock)
         body.addView(workspace, LinearLayout.LayoutParams(0, -1, 1f))
         val bodyLayer = FrameLayout(this)
@@ -699,13 +800,24 @@ class MainActivity : AppCompatActivity() {
                 clipToOutline = true
                 elevation = dp(3).toFloat()
                 labelVisibilityMode = NavigationBarView.LABEL_VISIBILITY_LABELED
-                itemActiveIndicatorColor = ColorStateList.valueOf(blush)
-                val navColors = ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()), intArrayOf(red, muted))
-                itemIconTintList = navColors; itemTextColor = navColors
-                menu.add(0, 1, 0, "Учить").setIcon(R.drawable.ic_nav_learn)
-                menu.add(0, 2, 1, "Слова").setIcon(R.drawable.ic_nav_words)
-                menu.add(0, 3, 2, "Прогресс").setIcon(R.drawable.ic_nav_stats)
-                menu.add(0, 4, 3, "Настройки").setIcon(R.drawable.ic_nav_settings)
+                isItemActiveIndicatorEnabled = false
+                itemRippleColor = null
+                val checked = intArrayOf(android.R.attr.state_checked)
+                val pressed = intArrayOf(android.R.attr.state_pressed)
+                val pressedTint = androidx.core.graphics.ColorUtils.blendARGB(red, ink, 0.28f)
+                val navColors = ColorStateList(arrayOf(pressed, checked, intArrayOf()), intArrayOf(pressedTint, red, muted))
+                itemIconTintList = navColors
+                itemTextColor = navColors
+                fun destination(id: Int, title: String, outline: Int, filled: Int) {
+                    menu.add(0, id, id - 1, title).icon = StateListDrawable().apply {
+                        addState(checked, getDrawable(filled))
+                        addState(intArrayOf(), getDrawable(outline))
+                    }
+                }
+                destination(1, "Учить", R.drawable.ic_nav_learn, R.drawable.ic_nav_learn_selected)
+                destination(2, "Слова", R.drawable.ic_nav_words, R.drawable.ic_nav_words_selected)
+                destination(3, "Прогресс", R.drawable.ic_nav_stats, R.drawable.ic_nav_stats_selected)
+                destination(4, "Настройки", R.drawable.ic_nav_settings, R.drawable.ic_nav_settings_selected)
                 selectedItemId = when (store.route) { "words" -> 2; "stats" -> 3; "settings" -> 4; else -> 1 }
                 setOnItemReselectedListener { /* Keep the current page and scroll position. */ }
                 setOnItemSelectedListener { item -> switchDestination(when (item.itemId) { 2 -> "words"; 3 -> "stats"; 4 -> "settings"; else -> "learn" }); true }
@@ -717,15 +829,7 @@ class MainActivity : AppCompatActivity() {
             })
             // Draw the page behind the dock, but allow its last item to scroll clear of it.
             nav.addOnLayoutChangeListener { _, _, top, _, bottom, _, _, _, _ ->
-                val clearance = bottom - top + dp(16)
-                if (scroll.paddingBottom != clearance) scroll.setPadding(0, 0, 0, clearance)
-                sectionPages.values.forEach { page ->
-                    if (page.scroll.paddingBottom != clearance) page.scroll.setPadding(0, 0, 0, clearance)
-                    page.list?.let {
-                        val bottomPadding = clearance + dp(24)
-                        if (it.paddingBottom != bottomPadding) it.setPadding(it.paddingLeft, it.paddingTop, it.paddingRight, bottomPadding)
-                    }
-                }
+                if (nav.visibility == View.VISIBLE) setNavigationClearance(bottom - top + dp(16))
             }
         }
         setContentView(root)
@@ -734,6 +838,18 @@ class MainActivity : AppCompatActivity() {
         installSectionPager()
         scheduleListeningAudio()
         ViewCompat.requestApplyInsets(root)
+    }
+
+    private fun setNavigationClearance(clearance: Int) {
+        sectionPages.values.forEach { page ->
+            if (page.scroll.paddingBottom != clearance) page.scroll.setPadding(0, 0, 0, clearance)
+            page.list?.let { list ->
+                val bottomPadding = clearance + dp(24)
+                if (list.paddingBottom != bottomPadding) {
+                    list.setPadding(list.paddingLeft, list.paddingTop, list.paddingRight, bottomPadding)
+                }
+            }
+        }
     }
     private var activityMonthOffset = 0
 
@@ -750,10 +866,19 @@ class MainActivity : AppCompatActivity() {
 
     private fun activityCalendar(summary: StudyActivity.Summary): LinearLayout {
         val box = card().apply { tag = "activity-calendar" }
+        val monthHeader = row()
+        val monthTitle = label("", 22f, jade, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(4), 0, dp(4), 0)
+        }
+        val monthHost = FrameLayout(this)
+        val dayHeight = dp(if (tablet) 48 else 40)
+        val dayTextSize = if (tablet) 16f else 15f
+        var outgoingMonth: View? = null
         // Month navigation only touches this card; reuse the already computed activity summary.
         val months = summary.days.entries.groupBy { it.key.take(7) }
-        fun showMonth() {
-            box.removeAllViews()
+        fun showMonth(direction: Int = 0) {
+            val monthContent = column()
             val month = java.util.Calendar.getInstance().apply {
                 set(java.util.Calendar.DAY_OF_MONTH, 1); add(java.util.Calendar.MONTH, activityMonthOffset)
             }
@@ -761,32 +886,40 @@ class MainActivity : AppCompatActivity() {
             val days = months[prefix].orEmpty().associate { it.key to it.value }
             val answers = days.values.sumOf { it.answers }
             val correct = days.values.sumOf { it.correct }
-            box.add(label(java.text.SimpleDateFormat("LLLL yyyy", java.util.Locale.forLanguageTag("ru")).format(month.time), 22f, jade, true))
-            box.twoButtons(button("← Предыдущий месяц") { activityMonthOffset--; showMonth() },
-                button("Следующий месяц →") { activityMonthOffset++; showMonth() }.apply { isEnabled = activityMonthOffset < 0 })
-            box.add(label("Дней занятий: ${days.size} · Ответов: $answers", 17f, ink, true), 12)
-            box.add(label(if (answers > 0) "Верно: $correct · Точность: ${correct.toLong() * 100 / answers}%" else "Пока нет ответов за этот месяц.", 15f, muted), 6)
+            monthTitle.text = java.text.SimpleDateFormat("LLLL yyyy", java.util.Locale.forLanguageTag("ru")).format(month.time)
+            val totals = label("Дней занятий: ${days.size} · Ответов: $answers", 17f, ink, true)
+            val accuracy = label(if (answers > 0) "Верно: $correct · Точность: ${correct.toLong() * 100 / answers}%" else "Пока нет ответов за этот месяц.", 15f, muted)
             val details = label("Выберите день, чтобы увидеть результаты.", 15f, jade).apply {
                 tag = "activity-day-details"
                 minLines = 2
                 accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
             }
-            box.add(details, 8)
+            fun addMonthDetails() {
+                monthContent.add(totals, 12)
+                monthContent.add(accuracy, 6)
+                monthContent.add(details, 8)
+            }
+            if (!tablet) addMonthDetails()
             val headers = row()
             listOf("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс").forEach { name ->
                 headers.addView(label(name, 12f, muted).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(0, dp(32), 1f))
             }
-            box.add(headers, 8)
+            monthContent.add(headers, 8)
             val first = (month.get(java.util.Calendar.DAY_OF_WEEK) + 5) % 7
             val length = month.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
             val today = StudyActivity.date(System.currentTimeMillis())
             var selected: TextView? = null
             fun background(cell: TextView, key: String, count: Int, active: Boolean) {
                 cell.isSelected = active
-                cell.background = GradientDrawable().apply {
-                    cornerRadius = dp(8).toFloat()
-                    setColor(if (count > 0) jade else if (active) Color.rgb(232, 238, 226) else Color.TRANSPARENT)
+                val fill = if (count > 0) jade else if (active) pale else Color.TRANSPARENT
+                val pressedFill = if (count > 0) ColorUtils.blendARGB(jade, Color.BLACK, 0.18f)
+                    else ColorUtils.blendARGB(if (active) pale else Color.WHITE, jade, 0.16f)
+                fun dayShape(color: Int) = bg(color, 8).apply {
                     if (active || key == today) setStroke(dp(if (active) 3 else 2), if (active) ink else gold)
+                }
+                cell.background = StateListDrawable().apply {
+                    addState(intArrayOf(android.R.attr.state_pressed), dayShape(pressedFill))
+                    addState(intArrayOf(), dayShape(fill))
                 }
             }
             // A fixed six-week grid keeps the card height and scroll position stable across months.
@@ -796,7 +929,7 @@ class MainActivity : AppCompatActivity() {
                     val day = week * 7 + column - first + 1
                     val key = "$prefix-${day.toString().padStart(2, '0')}"
                     val result = days[key] ?: StudyActivity.Day()
-                    val cell = label(if (day in 1..length) day.toString() else "", 15f,
+                    val cell = label(if (day in 1..length) day.toString() else "", dayTextSize,
                         if (result.answers > 0) Color.WHITE else ink, key == today).apply {
                         gravity = Gravity.CENTER
                         if (day in 1..length) {
@@ -817,26 +950,116 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                     }
-                    line.addView(cell, LinearLayout.LayoutParams(0, dp(40), 1f).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) })
+                    line.addView(cell, LinearLayout.LayoutParams(0, dayHeight, 1f).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) })
                 }
-                box.add(line)
+                monthContent.add(line)
             }
-            box.add(label("Зелёный — день занятий · золотая рамка — сегодня. Письмо тоже считается.", 13f, muted), 8)
+            if (tablet) addMonthDetails()
+            outgoingMonth?.let {
+                it.animate().cancel()
+                monthHost.overlay.remove(it)
+                outgoingMonth = null
+            }
+            val previous = monthHost.getChildAt(0)
+            previous?.animate()?.cancel()
+            val animate = direction != 0 && previous != null && monthHost.isLaidOut &&
+                (android.os.Build.VERSION.SDK_INT < 26 || ValueAnimator.areAnimatorsEnabled())
+            monthTitle.animate().cancel()
+            monthTitle.alpha = 1f
+            if (animate) {
+                // The overlay keeps the outgoing page visible without its touch targets.
+                monthHost.overlay.add(previous)
+                outgoingMonth = previous
+                val distance = direction * dp(32).toFloat()
+                val interpolator = FastOutSlowInInterpolator()
+                previous.animate().translationX(-distance).alpha(0f).setDuration(220)
+                    .setInterpolator(interpolator).withEndAction {
+                        monthHost.overlay.remove(previous)
+                        outgoingMonth = null
+                    }.start()
+                monthContent.translationX = distance
+                monthContent.alpha = 0f
+                monthContent.animate().translationX(0f).alpha(1f).setDuration(220)
+                    .setInterpolator(interpolator).start()
+                monthTitle.alpha = 0.35f
+                monthTitle.animate().alpha(1f).setDuration(220).setInterpolator(interpolator).start()
+            } else {
+                monthHost.removeAllViews()
+            }
+            monthHost.addView(monthContent, FrameLayout.LayoutParams(-1, -2))
         }
+        fun monthArrow(drawable: Int, description: String, action: () -> Unit) =
+            DetailUi.icon(this, drawable, description, action = action).apply {
+                background = null
+                val disabled = intArrayOf(-android.R.attr.state_enabled)
+                val pressed = intArrayOf(android.R.attr.state_enabled, android.R.attr.state_pressed)
+                val focused = intArrayOf(android.R.attr.state_focused)
+                val idle = intArrayOf()
+                val disabledTint = requireNotNull(imageTintList).getColorForState(disabled, jade)
+                imageTintList = ColorStateList(
+                    arrayOf(disabled, pressed, focused, idle), intArrayOf(disabledTint, red, gold, jade)
+                )
+                if (android.os.Build.VERSION.SDK_INT >= 26) defaultFocusHighlightEnabled = false
+
+                fun scaleTo(scale: Float, durationMs: Long) = ObjectAnimator.ofPropertyValuesHolder(
+                    this,
+                    PropertyValuesHolder.ofFloat(View.SCALE_X, scale),
+                    PropertyValuesHolder.ofFloat(View.SCALE_Y, scale)
+                ).setDuration(durationMs)
+                stateListAnimator = StateListAnimator().apply {
+                    addState(pressed, scaleTo(0.9f, 70))
+                    addState(idle, scaleTo(1f, 140))
+                }
+            }
+        lateinit var next: View
+        val previous = monthArrow(R.drawable.ic_stroke_back, "Предыдущий месяц") {
+            activityMonthOffset--
+            next.isEnabled = true
+            showMonth(-1)
+        }
+        next = monthArrow(R.drawable.ic_reader_next, "Следующий месяц") {
+            if (activityMonthOffset < 0) {
+                activityMonthOffset++
+                next.isEnabled = activityMonthOffset < 0
+                showMonth(1)
+            }
+        }
+        next.isEnabled = activityMonthOffset < 0
+        monthHeader.addView(previous, dp(48), dp(48))
+        monthHeader.addView(monthTitle, LinearLayout.LayoutParams(0, -2, 1f))
+        monthHeader.addView(next, dp(48), dp(48))
+        box.add(monthHeader)
+        box.add(monthHost)
+        box.add(label("Зелёный — день занятий · золотая рамка — сегодня. Письмо тоже считается.", 13f, muted), 8)
         showMonth()
         return box
     }
 
     private fun activityStatistics(summary: StudyActivity.Summary) {
-        content.add(motivationCard(summary), 16)
-        content.add(activityCalendar(summary), 16)
+        val streak = motivationCard(summary)
+        val calendar = activityCalendar(summary)
         val all = card()
         all.add(label("За всё время · вся библиотека", 22f, jade, true))
         all.add(label("Ответов: ${summary.answers} · Верно: ${summary.correct}\nПисьменных ответов: ${summary.writing} · Дней занятий: ${summary.days.size}", 17f), 12)
         all.add(label(if (summary.answers > 0) "Точность: ${summary.correct * 100 / summary.answers}%" else "Начните занятие — здесь появятся ваши результаты.", 15f, muted), 8)
         all.add(label("Одинаковые карточки в разных наборах учитываются один раз. Итоги относятся к сохранённой библиотеке; отменённые ответы не считаются.", 13f, muted), 8)
         if (summary.incompleteHistory) all.add(label("Для старых занятий сохранилась лишь часть дат: календарь, дни занятий и рекорд серии могут быть неполными. Общее число ответов сохранено.", 13f, muted), 8)
-        content.add(all, 16)
+        val calendarMaxWidth = 460
+        if (wideContent) {
+            val activity = row().apply { gravity = Gravity.TOP }
+            val calendarWidth = minOf(calendarMaxWidth, contentWidthDp * 3 / 5)
+            activity.addView(calendar, LinearLayout.LayoutParams(dp(calendarWidth), -2).apply { marginEnd = dp(18) })
+            val summaryColumn = column().apply {
+                add(streak)
+                add(all, 16)
+            }
+            activity.addView(summaryColumn, LinearLayout.LayoutParams(0, -2, 1f))
+            content.add(activity, 16)
+        } else {
+            content.add(streak, 16)
+            content.add(if (tablet) StudyLayout.centered(calendar, calendarMaxWidth) else calendar, 16)
+            content.add(all, 16)
+        }
     }
 
     private fun dashboard() {
@@ -851,6 +1074,7 @@ class MainActivity : AppCompatActivity() {
             welcome.add(button("Пока без заданий на слух") { store.audioEnabled = false; store.onboardingDone = true; startBeginner() }, 8)
             content.add(welcome, 16)
         }
+        content.add(button("Трудные слова") { chooseHardReview() }, 12)
         val packControls = if (wideContent) card() else content
         practicePicker(packControls)
         packControls.add(button("＋ Новый набор") { importHub() }, 10)
@@ -879,11 +1103,6 @@ class MainActivity : AppCompatActivity() {
         short.add(label("Короткое занятие", 21f, ink, true))
         short.add(label("${store.dailyNewWords} новых слов в день. Сначала повторение, затем новые слова. Можно закончить раньше, если всё повторено.", 15f, muted), 8)
         short.twoButtons(button("10 вопросов", true) { startShort(false) }, button("5 минут") { startShort(true) })
-        short.add(button("Трудные слова · ${store.packName}") {
-            val ranked = store.hardReviewTasks()
-            if (ranked.isEmpty()) toast("В этом наборе пока нет трудных заданий для повторения")
-            else chooseHardReview(ranked)
-        }, 8)
         if (store.shortSession && (!store.sessionFinished || store.feedback != null)) short.add(button("Продолжить короткое занятие") { store.route = "quiz"; render() }, 8)
         content.add(short, 16)
         val extra = card()
@@ -918,13 +1137,15 @@ class MainActivity : AppCompatActivity() {
         }
         startShort(false, focus)
     }
-    private fun startShort(minutes: Boolean, focus: List<Task>? = null, writing: Boolean = false, scheduled: Boolean = false, packReview: Boolean = false) {
+    private fun startShort(minutes: Boolean, focus: List<Task>? = null, writing: Boolean = false, scheduled: Boolean = false,
+        packReview: Boolean = false, reviewPacks: Set<String>? = null, selectedReview: Boolean = false
+    ) {
         if (focus?.isEmpty() ?: store.selectedStudyWords.isEmpty()) {
             toast("Выберите хотя бы одно слово")
             store.route = "words"; render(); return
         }
         store.writing = writing
-        store.beginSession(minutes, focus, scheduled, packReview)
+        store.beginSession(minutes, focus, scheduled, packReview, reviewPacks, selectedReview)
         store.route = "quiz"; store.nextQuestion(); render()
     }
     private fun startExtra(newWords: Boolean, writing: Boolean) {
@@ -964,7 +1185,7 @@ class MainActivity : AppCompatActivity() {
         if (store.packReview) {
             val missed = store.missedReviewTasks()
             if (missed.isNotEmpty()) content.add(button("Повторить ошибки (${missed.size})", true) {
-                startShort(false, missed, packReview = true)
+                startShort(false, missed, packReview = true, reviewPacks = store.hardReviewPackIds, selectedReview = store.selectedReview)
             }, 12)
         }
         extraPractice(content, afterSession = true)
@@ -1003,12 +1224,11 @@ class MainActivity : AppCompatActivity() {
         if (store.needsPreview(word) && store.feedback == null) {
             if (!tablet) content.add(label("Новое слово", 20f, jade, true)) else heading("Новое слово", "Познакомьтесь со словом перед первым вопросом.")
             val preview = card()
-            preview.add(label(word.writtenForms.joinToString(" / "), 48f, jade, true))
+            val pronounce = DetailUi.icon(this, R.drawable.ic_speaker, "Произношение") { play(word) }
+            preview.add(WordCardUi.titleRow(label(word.writtenForms.joinToString(" / "), 48f, jade, true), pronounce))
             preview.add(label("${word.pinyin} · ${word.numbered}", 24f), 12)
             preview.add(label(word.meanings.joinToString(" / "), 20f), 12)
-            val pronounce = button("▶ Произношение") { play(word) }
-            val strokes = button("Порядок черт") { strokeOrder(word) }
-            quizActions.quizButtonRow(listOf(pronounce, strokes))
+            quizActions.add(button("Порядок черт") { strokeOrder(word) }, 4)
             content.add(preview, 16)
             content.addSpeechExample(word)
             quizActions.add(button("Запомнил — к вопросам", true) { store.introduce(word); render() }, 8)
@@ -1046,9 +1266,7 @@ class MainActivity : AppCompatActivity() {
             else -> "Ответ: выберите иероглиф"
         }
         if (tablet) {
-            question.add(label(answerKind, 14f, red, true).apply {
-                background = bg(blush, 10); setPadding(dp(12), dp(10), dp(12), dp(10))
-            })
+            question.add(label(answerKind, 14f, jade, true))
         }
         if (tablet || store.feedback == null) question.add(label(task.skill.instruction, if (tablet) 20f else 16f, ink, true), if (tablet) 14 else 4)
         if (tablet && store.studyEngine.peek(task).mastered && store.feedback == null) question.add(label("Плановое повторение", 12f, jade), 6)
@@ -1068,9 +1286,9 @@ class MainActivity : AppCompatActivity() {
             keyboardQuestion.add(context)
         }
         if (audio && (tablet || store.feedback == null)) {
-            if (tablet) question.add(label("♪", 64f, jade).apply { gravity = Gravity.CENTER; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }, 14)
-            if (store.feedback == null) quizActions.add(button("▶  Послушать", true) { play(word) }, 4)
-            if (tablet) question.add(label("Повторяйте запись столько раз, сколько нужно.", 13f, muted), 10)
+            if (store.feedback == null) {
+                quizActions.addIcon(DetailUi.icon(this, R.drawable.ic_speaker, "Послушать") { play(word) }, 4, Gravity.CENTER_HORIZONTAL)
+            }
             audioNotice = label(if (store.audioProvider == "hanping") "Звук воспроизводит Hanping" else voiceMessage ?: "Используется китайский голос устройства", 12f, muted)
             question.add(audioNotice!!, 8)
         } else if (!audio && (tablet || store.feedback == null)) {
@@ -1173,7 +1391,7 @@ class MainActivity : AppCompatActivity() {
             if (task.skill in StudyStore.characterSkills) quizActions.add(button("Не знаю — показать ответ") { submit(false) }, 6)
         } else {
             val correct = store.feedback == true
-            val result = card(if (store.answerIgnored) paper else if (correct) pale else Color.rgb(253, 236, 228))
+            val result = card(if (store.answerIgnored) paper else if (correct) pale else blush)
             result.add(label(if (store.answerIgnored) "Ответ не учтён" else if (correct) "✓  Верно" else "Неверно", 22f, if (store.answerIgnored) ink else if (correct) jade else red, true))
             fun showSolution() {
                 result.add(label(word.writtenForms.joinToString(" / "), 48f, jade), 12)
@@ -1227,7 +1445,9 @@ class MainActivity : AppCompatActivity() {
         val overview = button("К обзору") { store.route = "learn"; render() }
         val toolsAvailable = store.shortSession || store.needsPreview(word) || store.feedback != null ||
             store.revealed || store.current?.skill in setOf(Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER)
-        quizActions.quizButtonRow(if (toolsAvailable) listOf(overview, button("Ещё") { quizTools(word) }) else listOf(overview))
+        if (toolsAvailable) {
+            quizActions.addWithIcon(overview, listIcon(R.drawable.ic_list_more, "Ещё") { quizTools(word) }, 4)
+        } else quizActions.quizButtonRow(listOf(overview))
     }
 
     private fun quizTools(word: Word) {
@@ -1236,16 +1456,16 @@ class MainActivity : AppCompatActivity() {
         fun action(title: String, block: () -> Unit) { tools.add(button(title) { sheet.dismiss(); block() }, 6) }
         val answerVisible = store.feedback != null || store.needsPreview(word) || store.revealed
         if (answerVisible || store.current?.skill in setOf(Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER)) {
-            action("▶  Произношение") { play(word) }
+            action("Произношение") { play(word) }
             if (store.audioProvider == "hanping") action("Нет звука? Голос устройства") { useDeviceVoice(word) }
         }
         if (answerVisible) {
             action("Порядок черт") { strokeOrder(word) }
-            action("Словарь") { dictionary(word) }
+            action("Словарь") { wordDetails(word) }
             tools.addSpeechExample(word)
         }
         if (store.shortSession) action("Завершить занятие") { voice.stop(); store.endSession(); render() }
-        action("Закрыть меню") { }
+        tools.addIcon(DetailUi.icon(this, R.drawable.ic_close, "Закрыть меню", action = sheet::dismiss), 6, Gravity.END)
         sheet.setContentView(androidx.core.widget.NestedScrollView(this).apply { addView(tools) })
         sheet.behavior.maxHeight = resources.displayMetrics.heightPixels * 4 / 5
         sheet.show()
@@ -1310,10 +1530,15 @@ class MainActivity : AppCompatActivity() {
                 sentence.setSpan(StyleSpan(Typeface.BOLD), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
         }
-        panel.add(label("", 28f).apply { text = sentence }, 12)
-        panel.add(button("▶  Слушать фразу") {
+        val example = label("", 28f).apply {
+            text = sentence
+            WordDetailsSheet.enableWordLookup(this, { vocabularySearch(it) })
+        }
+        val pronounce = DetailUi.icon(this@MainActivity, R.drawable.ic_speaker, "Слушать фразу") {
             voice.play(word.copy(hanzi = source.example), "system", store.slowAudio)?.let { message("Звук недоступен", it) }
-        }, 12)
+        }
+        panel.add(WordCardUi.titleRow(example, pronounce), 12)
+        panel.add(label("Выделите слово в примере и нажмите «Найти слово».", 14f, muted), 6)
         panel.add(label("Произнесите фразу и попробуйте её перевести.", 15f, muted), 12)
 
         val details = column().apply {
@@ -1545,16 +1770,6 @@ class MainActivity : AppCompatActivity() {
         }, 12)
         parent.add(label(store.practiceLabel, 14f, muted), 6)
     }
-    private fun packPicker() {
-        content.add(button("Набор: ${store.packName} ▾") {
-            val names = store.visiblePackNames
-            MaterialAlertDialogBuilder(this).setTitle("Выберите набор")
-                .setSingleChoiceItems(names.map { store.packLabel(it.first, it.second) }.toTypedArray(), names.indexOfFirst { it.first == store.activePackId }) { dialog, index ->
-                    voice.stop(); store.editPack(names[index].first); dialog.dismiss(); render()
-                }.setPositiveButton("Закрыть", null)
-                .setNeutralButton("Изменить") { _, _ -> managePack() }.show()
-        }, 12)
-    }
     private fun chooseEditingPack(action: () -> Unit) {
         val names = store.packNames.filter { it.first in store.practicePackIds }
         if (names.size == 1) { store.editPack(names.first().first); action(); return }
@@ -1775,9 +1990,12 @@ class MainActivity : AppCompatActivity() {
             try { store.renamePack(name.text.toString()); dialog.dismiss(); render() } catch (e: Exception) { name.error = e.message }
         } }; dialog.show()
     }
+    private var libraryCardFilter = ""
+
     private fun library() {
         heading("Ваши слова", "Отметьте слова, которые хотите учить.")
         content.add(button("＋ Новый набор", true) { importHub() }, 12)
+        content.add(button("Мои тексты") { reader().library() }, 8)
         practicePicker()
         content.add(button("Управление наборами и папками") { manageLibrary() }, 8)
         content.twoButtons(button("＋ Слово") { chooseEditingPack { editWord(null) } }, button("Файлы") {
@@ -1792,17 +2010,33 @@ class MainActivity : AppCompatActivity() {
         content.twoButtons(button("Выбрать все") { store.selectLibraryWords(true); render() }, button("Снять выбор") { store.selectLibraryWords(false); render() })
         // Read the library once. Searching and updating counters must not serialize progress again.
         val sharedPacks = store.sharedPackNames()
-        val entries = store.libraryPacks().flatMap { pack -> pack.words.map { word -> LibraryEntry(pack, word, sharedPacks[SharedWords.identity(word)].orEmpty()) } }
+        val packs = store.libraryPacks()
+        val entries = packs.flatMap { pack -> pack.words.map { word -> LibraryEntry(pack, word, sharedPacks[SharedWords.identity(word)].orEmpty()) } }
         var selectedCount = entries.count { it.selected }
         fun selectionText() = "Выбрано $selectedCount из ${entries.size}"
         content.add(label("Отметьте отдельно: «Узнаю слово» — знание значения, пиньиня и произношения; «Умею писать» — написание по памяти. Отмеченные навыки вернутся на повторение завтра. У одинаковых слов прогресс общий во всех наборах. Выбор «Учить» остаётся отдельным; в совместной практике слово появляется один раз.", 13f, muted), 12)
         val selectedLabel = label(selectionText(), 14f, jade)
         content.add(selectedLabel, 16)
-        val search = field("Найти слово, пиньинь или перевод", "", content)
-        val emptyLabel = label("Слова не найдены", 16f, muted).apply { visibility = View.GONE }
-        content.add(emptyLabel, 12)
+        val searchBar = column().apply {
+            val side = dp(if (tablet) 24 else 18)
+            setPadding(side, dp(8), side, 0)
+        }
+        val search = searchField("Найти слово, пиньинь или перевод", libraryCardFilter, searchBar)
+        search.setOnEditorActionListener { _, action, _ ->
+            if (action != EditorInfo.IME_ACTION_SEARCH) false else {
+                hideLibrarySearchKeyboard(search)
+                true
+            }
+        }
+        val status = label("", 14f, muted).apply { visibility = View.GONE }
+        searchBar.add(status, 4)
+        val owner = store
+        val savedEntries = entries.associateBy { VocabularyReference(it.pack.id, it.word.id) }.toMutableMap()
+        val loadedPacks = packs.associateBy { it.id }.toMutableMap()
+        val allCards = entries.map { LibraryCardResult(it.word, saved = it) }
+        val snapshot by lazy { owner.vocabularyLookup() }
+        var filtered = allCards
         val columns = cardColumns()
-        var filtered = entries
         val adapter = object : BaseAdapter() {
             override fun getCount() = (filtered.size + columns - 1) / columns
             override fun getItem(position: Int) = filtered[position * columns]
@@ -1818,7 +2052,7 @@ class MainActivity : AppCompatActivity() {
                             selectionLabel?.text = "${store.selectedStudyWords.size} слов"
                         }, onKnowledgeChanged = { word, category, checked ->
                             val identity = SharedWords.identity(word)
-                            entries.filter { SharedWords.identity(it.word) == identity }.forEach { entry ->
+                            savedEntries.values.filter { SharedWords.identity(it.word) == identity }.forEach { entry ->
                                 if (category == WordKnowledge.RECOGNITION) entry.recognized = checked else entry.writable = checked
                             }
                             notifyDataSetChanged()
@@ -1839,33 +2073,119 @@ class MainActivity : AppCompatActivity() {
                 return line
             }
         }
-        installSectionList("words", adapter)
-        search.doAfterTextChanged { text ->
-            val needle = Answers.meaning(text.toString())
-            filtered = if (needle.isEmpty()) entries else entries.filter { needle in it.searchText }
-            emptyLabel.visibility = if (filtered.isEmpty()) View.VISIBLE else View.GONE
+        installSectionList("words", adapter, searchBar = searchBar)
+        val list = checkNotNull(sectionList)
+        val libraryHeader = content
+        cancelLibrarySearch?.invoke()
+        var pending: Runnable? = null
+        var work: java.util.concurrent.Future<*>? = null
+        var signal: CancellationSignal? = null
+        var generation = 0
+        fun cancel() {
+            generation++
+            pending?.let(librarySearchHandler::removeCallbacks)
+            work?.cancel(false)
+            signal?.cancel()
+        }
+        cancelLibrarySearch = ::cancel
+        fun update(rows: List<LibraryCardResult>, message: String) {
+            filtered = rows
+            status.text = message
+            status.visibility = if (message.isEmpty()) View.GONE else View.VISIBLE
             adapter.notifyDataSetChanged()
         }
+        fun find() {
+            cancel()
+            val token = generation
+            libraryCardFilter = search.text.toString()
+            val query = libraryCardFilter.trim()
+            val wasSearching = libraryHeader.visibility == View.GONE
+            libraryHeader.visibility = if (query.isEmpty()) View.VISIBLE else View.GONE
+            if (query.isEmpty()) {
+                update(allCards, "")
+                if (wasSearching) list.setSelectionFromTop(0, 0)
+                return
+            }
+            if (filtered.isNotEmpty()) update(emptyList(), "Поиск…")
+            else if (status.text != "Поиск…") {
+                status.text = "Поиск…"
+                status.visibility = View.VISIBLE
+            }
+            pending = Runnable {
+                if (token != generation || owner !== store) return@Runnable
+                val vocabulary = snapshot
+                val request = CancellationSignal().also { signal = it }
+                work = librarySearchWorker.submit {
+                    val matches = vocabulary.search(query)
+                    if (request.isCanceled) return@submit
+                    val found = libraryDictionaries.map { dictionary -> runCatching {
+                        dictionary.search(query, request).map { SourcedDefinition(dictionary.source, it) }
+                    } }
+                    if (request.isCanceled) return@submit
+                    val groups = dictionaryResults(matches, found.flatMap { it.getOrDefault(emptyList()) }, query)
+                    librarySearchHandler.post {
+                        if (isDestroyed || token != generation || owner !== store) return@post
+                        val missingPacks = matches.mapTo(mutableSetOf()) { it.packId } - loadedPacks.keys
+                        if (missingPacks.isNotEmpty()) {
+                            owner.libraryPacks(missingPacks).associateByTo(loadedPacks) { it.id }
+                        }
+                        val rows = groups.flatMap { result ->
+                            if (result.cards.isEmpty()) {
+                                val primary = result.forms.preferred(query)
+                                val reading = result.definitions.firstOrNull { it.entry.pinyin.isNotBlank() }
+                                    ?.entry?.pinyin.orEmpty()
+                                val word = Word("", primary, Pinyin.marked(reading), reading,
+                                    emptyList(), emptyList(), alternatives = result.forms.values.filterNot { it == primary })
+                                listOf(LibraryCardResult(word, dictionary = result))
+                            } else result.cards.mapNotNull { card ->
+                                val pack = loadedPacks[card.packId] ?: return@mapNotNull null
+                                val saved = savedEntries.getOrPut(card.reference) {
+                                    LibraryEntry(pack, card.word, sharedPacks[SharedWords.identity(card.word)].orEmpty(),
+                                        inPractice = false)
+                                }
+                                LibraryCardResult(card.word, saved, result)
+                            }
+                        }
+                        val message = when {
+                            rows.isEmpty() && found.all { it.isFailure } -> "Словари недоступны."
+                            rows.isEmpty() -> "Совпадений нет."
+                            found.any { it.isFailure } -> "Один из словарей недоступен."
+                            else -> ""
+                        }
+                        update(rows, message)
+                    }
+                }
+            }.also { librarySearchHandler.postDelayed(it, 200) }
+        }
+        search.doAfterTextChanged { find() }
+        if (libraryCardFilter.isNotBlank()) find()
     }
 
-    private class LibraryEntry(val pack: StudyStore.LibraryPack, val word: Word, val sharedPacks: List<String>) {
+    private fun hideLibrarySearchKeyboard(search: View) {
+        getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(search.windowToken, 0)
+    }
+
+    private data class LibraryCardResult(val word: Word, val saved: LibraryEntry? = null,
+        val dictionary: DictionaryResult? = null)
+
+    private class LibraryEntry(val pack: StudyStore.LibraryPack, val word: Word, val sharedPacks: List<String>,
+        val inPractice: Boolean = true) {
         var selected = word.id in pack.selected
         var recognized = word.id in pack.recognized
         var writable = word.id in pack.writable
-        val searchText by lazy { Answers.meaning("${pack.name} ${word.hanzi} ${word.pinyin} ${word.numbered} ${word.meanings.joinToString(" ")}") }
     }
 
     private inner class LibraryWordCard(onSelectionChanged: (Boolean) -> Unit,
         onKnowledgeChanged: (Word, WordKnowledge, Boolean) -> Unit) {
-        val view = card()
-        private lateinit var entry: LibraryEntry
+        val view = WordCardUi.surface(this@MainActivity)
+        private lateinit var result: LibraryCardResult
         private var binding = false
         private val packLabel = label("", 13f, muted)
-        private val title = label("", 25f, jade, true)
+        private val title = WordCardUi.title(this@MainActivity, "")
         private val meaning = label("", 15f, muted)
         private val selected = CheckBox(this@MainActivity).apply {
             minWidth = dp(48); minHeight = dp(48); buttonTintList = ColorStateList.valueOf(jade)
-            setOnCheckedChangeListener { _, checked -> if (!binding) {
+            setOnCheckedChangeListener { _, checked -> if (!binding) result.saved?.let { entry ->
                 store.selectLibraryWord(entry.pack.id, entry.word.id, checked)
                 entry.selected = checked
                 onSelectionChanged(checked)
@@ -1875,7 +2195,7 @@ class MainActivity : AppCompatActivity() {
         private val known = WordKnowledge.entries.map { category ->
             CheckBox(this@MainActivity).apply {
                 text = category.title; minHeight = dp(48); buttonTintList = ColorStateList.valueOf(jade)
-                setOnCheckedChangeListener { _, checked -> if (!binding) {
+                setOnCheckedChangeListener { _, checked -> if (!binding) result.saved?.let { entry ->
                     store.setWordKnown(entry.pack.id, entry.word.id, category, checked)
                     if (category == WordKnowledge.RECOGNITION) entry.recognized = checked else entry.writable = checked
                     onKnowledgeChanged(entry.word, category, checked)
@@ -1883,17 +2203,11 @@ class MainActivity : AppCompatActivity() {
                 } }
             }
         }
-        init {
-            view.add(packLabel, 4)
-            val line = row()
-            line.addView(selected)
-            val info = column().apply { add(title); add(meaning, 6) }
-            line.addView(info, LinearLayout.LayoutParams(0, -2, 1f)); view.add(line)
-            known.forEach { view.add(it, 4) }
-            view.twoButtons(button("▶ Слушать") { play(entry.word) }, button("Словарь") { dictionary(entry.word) })
-            view.add(button("Порядок черт") { strokeOrder(entry.word) }, 8)
-            view.add(button("Изменить слово") { store.editPack(entry.pack.id); editWord(entry.word) }, 8)
-            view.add(button("Навыки этого слова") {
+        private val edit = button("Изменить слово") {
+            result.saved?.let { entry -> store.editPack(entry.pack.id); editWord(entry.word) }
+        }
+        private val skills = button("Навыки этого слова") {
+            result.saved?.let { entry ->
                 val word = entry.word
                 store.editPack(entry.pack.id)
                 val allowed = store.engine.tasks(store.words, false, store.audioEnabled).filter { it.wordId == word.id } + Task(word.id, Skill.WRITING)
@@ -1902,84 +2216,126 @@ class MainActivity : AppCompatActivity() {
                     "${t.skill.title}\n${if (p.mastered) "Закреплено" else if (p.attempts == 0) "Новый" else "На повторении"} · попыток ${p.attempts}, ошибок ${p.errors}, серия ${p.streak}"
                 }
                 message("${word.hanzi} · ${word.pinyin}", details)
-            }, 8)
+            }
         }
-        fun bind(value: LibraryEntry) {
+        private val listen = DetailUi.icon(this@MainActivity, R.drawable.ic_speaker, "Слушать") { play(result.word) }
+
+        private val details = button("Подробнее") {
+            hideLibrarySearchKeyboard(view)
+            result.dictionary?.let { createDictionaryScreen().open(it, result.word) }
+                ?: wordDetails(result.word)
+        }
+        private val strokes = button("Порядок черт") {
+            hideLibrarySearchKeyboard(view)
+            val word = result.word
+            val forms = word.writtenForms + result.dictionary?.forms?.values.orEmpty()
+            strokeOrder(word.copy(alternatives = forms.distinct().filterNot { it == word.hanzi }))
+        }
+
+        init {
+            view.add(packLabel, 4)
+            val line = row().apply { gravity = Gravity.TOP }
+            line.addView(selected)
+            val info = column().apply {
+                add(WordCardUi.titleRow(title, listen))
+                add(meaning, 6)
+            }
+            line.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
+            view.add(line)
+            known.forEach { view.add(it, 4) }
+            view.add(details, 12)
+            view.add(strokes, 8)
+            view.add(edit, 8)
+            view.add(skills, 8)
+        }
+
+        fun bind(value: LibraryCardResult) {
             binding = true
-            entry = value
-            val (pack, word) = value.pack to value.word
-            packLabel.text = pack.name + if (entry.sharedPacks.size > 1) "\nОбщий прогресс: ${entry.sharedPacks.joinToString(", ")}" else ""
-            title.text = "${word.hanzi}   ${word.pinyin}"
-            meaning.text = word.meanings.joinToString(" / ")
-            selected.contentDescription = "Учить ${word.hanzi} · ${pack.name}"
-            selected.isChecked = value.selected
-            WordKnowledge.entries.forEachIndexed { index, category ->
-                known[index].contentDescription = "${category.title}: ${word.hanzi} · ${pack.name}"
-                known[index].isChecked = if (category == WordKnowledge.RECOGNITION) value.recognized else value.writable
+            result = value
+            val entry = value.saved
+            val word = value.word
+            val reading = word.numbered.ifBlank { word.pinyin }
+            val readingKey = dictionaryReadingKey(reading)
+            val definitions = value.dictionary?.definitions.orEmpty()
+            val matching = definitions.filter {
+                it.entry.pinyin.isBlank() || dictionaryReadingKey(it.entry.pinyin) == readingKey
+            }
+            packLabel.text = if (entry == null) matching.map { it.source.label }.distinct().joinToString(" / ")
+                else entry.pack.name + if (entry.sharedPacks.size > 1) "\nОбщий прогресс: ${entry.sharedPacks.joinToString(", ")}" else ""
+            title.text = "${word.hanzi}   ${word.pinyin.ifBlank { readingLabel(reading) }}"
+            meaning.text = (listOf(word.meanings.joinToString(" / ")) + matching.distinctBy { it.source }
+                .mapNotNull { it.entry.meanings.firstOrNull() }).filter { it.isNotBlank() }.distinct().joinToString("\n")
+            listen.isEnabled = reading.isNotBlank()
+            details.contentDescription = "Подробнее · ${word.hanzi}"
+            strokes.contentDescription = "Порядок черт · ${word.hanzi}"
+            selected.visibility = if (entry?.inPractice == true) View.VISIBLE else View.GONE
+            (listOf(edit, skills) + known).forEach { it.visibility = if (entry == null) View.GONE else View.VISIBLE }
+            if (entry != null) {
+                selected.contentDescription = "Учить ${word.hanzi} · ${entry.pack.name}"
+                selected.isChecked = entry.selected
+                WordKnowledge.entries.forEachIndexed { index, category ->
+                    known[index].contentDescription = "${category.title}: ${word.hanzi} · ${entry.pack.name}"
+                    known[index].isChecked = if (category == WordKnowledge.RECOGNITION) entry.recognized else entry.writable
+                }
             }
             binding = false
         }
     }
     private fun stats() {
-        heading("Прогресс", "Обзор всей библиотеки и подробности по набору.")
-        val summaries = store.overview(includeTotal = true)
-        val overview = summaries.dropLast(1)
-        val total = summaries.last()
+        heading("Прогресс", "Прогресс по словам, отмеченным в разделе «Слова».")
+        val words = store.selectedStudyWords
+        val engine = store.selectionEngine
+        val knowledgeTasks = engine.tasks(words, false, store.audioEnabled)
+        val all = ListeningAvailability.filter(knowledgeTasks, words, store.audioProvider)
+        val writing = engine.tasks(words, true, false)
+        val tasks = all + writing
+        val problematic = store.hardReviewTasks(tasks, engine)
+        content.add(button("Практиковать трудные слова", true) { chooseHardReview(selectedReview = true) }, 12)
         activityStatistics(store.activitySummary())
-        val combined = card()
-        combined.add(label("Все наборы · ${total.total} уникальных слов", 22f, jade, true))
-        combined.add(label("Введено: ${total.introduced} · Слов изучено: ${total.learned}\nНавыков закреплено: ${total.mastered} · Повторений пора: ${total.due}", 17f), 12)
-        combined.add(label("Слово изучено, когда закреплены все доступные направления, включая письмо и аудирование. Повторения считаются по навыкам. Одинаковые слова учитываются один раз в общих итогах и отображаются в каждом своём наборе.", 13f, muted), 8)
-        overview.forEach { pack -> combined.add(label("${pack.name}: введено ${pack.introduced}/${pack.total} · изучено ${pack.learned} · пора повторить ${pack.due}", 15f), 10) }
-        Skill.entries.forEach { skill ->
-            val states = total.skills[skill].orEmpty()
-            combined.add(label("${skill.title}: закреплено ${states.count { it.mastered }}/${states.size} · трудных ${states.count { it.errors > 0 && !it.mastered }} · ошибок ${states.sumOf { it.errors }}/${states.sumOf { it.attempts }}", 14f), 8)
-        }
-        content.add(combined, 16)
-        packPicker()
-        val knowledgeTasks = store.engine.tasks(store.words, false, store.audioEnabled)
-        val all = ListeningAvailability.filter(knowledgeTasks, store.words, store.audioProvider)
-        val writing = store.engine.tasks(store.words, true, false)
         val summary = card()
-        summary.add(label("Знание: ${all.count { store.engine.peek(it).mastered }} / ${all.size}", 20f, jade, true))
-        summary.add(progress(all, store.engine), 12)
-        summary.add(label("Написание: ${writing.count { store.engine.peek(it).mastered }} / ${writing.size}", 20f, jade, true), 20)
-        summary.add(progress(writing, store.engine), 12)
-        summary.add(label("В этом обзоре — все слова текущего набора. Обучение использует только выбранные слова.", 13f, muted), 14)
+        summary.add(label("Выбранные слова · ${words.size}", 22f, jade, true))
+        val introduced = words.count { !store.needsPreview(it, engine) }
+        val learned = tasks.groupBy { it.wordId }.values.count { wordTasks -> wordTasks.all { engine.peek(it).mastered } }
+        val now = System.currentTimeMillis()
+        val due = tasks.count { engine.peek(it).due in 1L..now }
+        summary.add(label("Введено: $introduced · Слов изучено: $learned\nНавыков закреплено: ${tasks.count { engine.peek(it).mastered }} · Повторений пора: $due", 17f), 12)
+        summary.add(label("Знание: ${all.count { engine.peek(it).mastered }} / ${all.size}", 20f, jade, true), 20)
+        summary.add(progress(all, engine), 12)
+        summary.add(label("Написание: ${writing.count { engine.peek(it).mastered }} / ${writing.size}", 20f, jade, true), 20)
+        summary.add(progress(writing, engine), 12)
+        tasks.groupBy { it.skill }.entries.sortedBy { it.key }.forEach { (skill, skillTasks) ->
+            val states = skillTasks.map(engine::peek)
+            summary.add(label("${skill.title}: закреплено ${states.count { it.mastered }}/${states.size} · трудных ${states.count { it.errors > 0 && !it.mastered }} · ошибок ${states.sumOf { it.errors }}/${states.sumOf { it.attempts }}", 14f), 8)
+        }
         content.add(summary, 20)
         content.add(label("Что сложнее запомнить", 22f, ink, true), 24)
         content.add(label("Здесь задания с ошибками. Чем чаще вы ошибаетесь и чем короче серия верных ответов, тем выше задание в списке. Закреплённые задания исчезают из списка.", 13f, muted), 8)
-        val wordsById = store.words.associateBy { it.id }
-        val validKeys = all.map { it.key }.toSet()
-        val pairs = store.engine.progress.entries.flatMap { (key, state) ->
-            val word = wordsById[key.substringBefore(':')]
-            state.confusions.entries.filter { word != null && key in validKeys && !word.acceptsForm(it.key) }.map { Triple(word!!, it.key, it.value) }
+        val wordsById = words.associateBy { it.id }
+        val pairs = all.flatMap { task ->
+            val word = wordsById.getValue(task.wordId)
+            engine.peek(task).confusions.entries.filterNot { word.acceptsForm(it.key) }.map { Triple(word, it.key, it.value) }
         }.sortedByDescending { it.third }
         if (pairs.isNotEmpty()) {
             content.add(label("Часто путаю", 22f, ink, true), 16)
             pairs.take(20).forEach { (word, wrong, count) -> content.add(label("${word.hanzi} ↔ $wrong · $count ошибок", 17f), 6) }
             content.add(button("Практиковать похожие знаки") {
-                val focus = all.filter { task -> store.engine.peek(task).confusions.keys.any { !wordsById.getValue(task.wordId).acceptsForm(it) } }
+                val focus = all.filter { task -> engine.peek(task).confusions.keys.any { !wordsById.getValue(task.wordId).acceptsForm(it) } }
                 val partners = focus.flatMap { task ->
-                    val wrong = store.engine.peek(task).confusions.keys
-                    store.words.filter { word -> word.writtenForms.any { it in wrong } }.map { Task(it.id, task.skill) }
+                    val wrong = engine.peek(task).confusions.keys
+                    words.filter { word -> word.writtenForms.any { it in wrong } }.map { Task(it.id, task.skill) }
                 }
-                val valid = (all + writing).toSet()
-                startShort(false, (focus + partners).distinct().filter { it in valid }, packReview = true)
+                val valid = all.toSet()
+                startShort(false, (focus + partners).distinct().filter { it in valid }, packReview = true, selectedReview = true)
             }, 12)
         }
-        val problematic = store.hardReviewTasks(all + writing)
-        if (problematic.isNotEmpty()) content.add(button("Практиковать трудные слова", true) {
-            chooseHardReview(problematic)
-        }, 12)
-        if (problematic.isEmpty()) content.add(label("Сейчас нет трудных заданий для повторения.", 15f, muted), 12)
+        if (problematic.isEmpty()) content.add(label("Среди выбранных слов пока нет трудных заданий для повторения.", 15f, muted), 12)
         if (problematic.size > 100) content.add(label("Показаны 100 самых сложных заданий.", 13f, muted), 10)
-        val excluded = store.words.size * (if (store.audioEnabled) 9 else 7) - knowledgeTasks.size
+        val excluded = words.size * (if (store.audioEnabled) 9 else 7) - knowledgeTasks.size
         val footer = if (excluded > 0) column().apply {
             add(label("Исключено неоднозначных направлений: $excluded. Одинаковое произношение или перевод не должны заставлять вас угадывать.", 14f, muted), 20)
         } else null
         val difficult = problematic.take(100).map { task ->
-            DifficultWord(wordsById.getValue(task.wordId), task.skill, store.engine.peek(task).copy())
+            DifficultWord(wordsById.getValue(task.wordId), task.skill, engine.peek(task).copy())
         }
         val columns = cardColumns()
         val adapter = object : BaseAdapter() {
@@ -2007,19 +2363,82 @@ class MainActivity : AppCompatActivity() {
         installSectionList("stats", adapter, footer)
     }
 
-    private fun chooseHardReview(problematic: List<Task>) {
+    private fun chooseHardReview(selectedReview: Boolean = false) {
+        val packs = if (selectedReview) emptyList() else store.visiblePackNames
+        val chosenPacks = packs.mapNotNull { (id, _) -> id.takeIf { it in store.practicePackIds } }.toMutableSet()
+        val chosenSkills = Skill.entries.toMutableSet()
         val groups = listOf(
-            "Все трудные задания" to problematic,
-            "Пиньинь и тоны" to problematic.filter { it.skill in setOf(Skill.CHARACTER_TONE, Skill.CHARACTER_PINYIN, Skill.MEANING_PINYIN) },
-            "Аудирование" to problematic.filter { it.skill in setOf(Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER) },
-            "Перевод" to problematic.filter { it.skill in setOf(Skill.CHARACTER_MEANING, Skill.PINYIN_MEANING) },
-            "Выбор иероглифа" to problematic.filter { it.skill in setOf(Skill.MEANING_CHARACTER, Skill.PINYIN_CHARACTER) },
-            "Написание" to problematic.filter { it.skill == Skill.WRITING }
-        ).filter { it.second.isNotEmpty() }
-        val labels = groups.map { (name, tasks) -> "$name · ${minOf(10, tasks.size)} в занятии" }
-        MaterialAlertDialogBuilder(this).setTitle("Что практиковать?").setItems(labels.toTypedArray()) { _, index ->
-            startShort(false, groups[index].second.take(10), packReview = true)
-        }.setNegativeButton("Отмена", null).show()
+            "Пиньинь и тоны" to setOf(Skill.CHARACTER_TONE, Skill.CHARACTER_PINYIN, Skill.MEANING_PINYIN),
+            "Аудирование" to setOf(Skill.AUDIO_MEANING, Skill.AUDIO_CHARACTER),
+            "Перевод" to setOf(Skill.CHARACTER_MEANING, Skill.PINYIN_MEANING),
+            "Выбор иероглифа" to setOf(Skill.MEANING_CHARACTER, Skill.PINYIN_CHARACTER),
+            "Написание" to setOf(Skill.WRITING)
+        )
+        val box = column().apply { setPadding(dp(20), dp(8), dp(20), dp(8)) }
+        val packHeading = if (selectedReview) null else label("", 18f, ink, true)
+        val summary = label("", 15f, muted)
+        lateinit var dialog: androidx.appcompat.app.AlertDialog
+        var ranked = if (selectedReview) store.selectedHardReviewTasks() else store.hardReviewTasks(chosenPacks)
+        fun refresh() {
+            packHeading?.text = "Наборы слов · ${chosenPacks.size} из ${packs.size}"
+            val count = ranked.count { it.skill in chosenSkills }
+            summary.text = when {
+                !selectedReview && chosenPacks.isEmpty() -> "Выберите хотя бы один набор."
+                chosenSkills.isEmpty() -> "Выберите хотя бы один вид занятий."
+                count == 0 && selectedReview -> "Нет трудных заданий для выбранных слов и занятий."
+                count == 0 -> "Нет трудных заданий для выбранных наборов и занятий."
+                else -> "$count трудных заданий · ${minOf(10, count)} в занятии"
+            }
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).isEnabled = count > 0
+        }
+        if (packHeading != null) {
+            box.add(packHeading)
+            box.add(label("Отметьте один или несколько наборов для повторения.", 14f, muted), 4)
+        }
+        packs.forEach { (id, name) ->
+            box.add(CheckBox(this).apply {
+                text = store.packLabel(id, name); isChecked = id in chosenPacks
+                minHeight = dp(48); buttonTintList = ColorStateList.valueOf(jade)
+                setOnCheckedChangeListener { _, checked ->
+                    if (checked) chosenPacks.add(id) else chosenPacks.remove(id)
+                    ranked = store.hardReviewTasks(chosenPacks)
+                    refresh()
+                }
+            })
+        }
+        box.add(label("Виды занятий", 18f, ink, true), 16)
+        groups.forEach { (name, skills) ->
+            box.add(CheckBox(this).apply {
+                text = name; isChecked = true; minHeight = dp(48)
+                buttonTintList = ColorStateList.valueOf(jade)
+                setOnCheckedChangeListener { _, checked ->
+                    if (checked) chosenSkills.addAll(skills) else chosenSkills.removeAll(skills)
+                    refresh()
+                }
+            })
+        }
+        box.add(summary, 12)
+        dialog = MaterialAlertDialogBuilder(this).setTitle("Трудные слова")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Начать", null).setNegativeButton("Отмена", null).create()
+        dialog.setOnShowListener {
+            refresh()
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
+                if (selectedReview) {
+                    ranked = store.selectedHardReviewTasks()
+                    val focus = ranked.filter { it.skill in chosenSkills }.take(10)
+                    if (focus.isNotEmpty()) {
+                        voice.stop(); dialog.dismiss()
+                        startShort(false, focus, packReview = true, selectedReview = true)
+                    } else refresh()
+                } else if (store.beginHardReview(chosenPacks, chosenSkills)) {
+                    voice.stop(); dialog.dismiss()
+                    store.writing = false
+                    store.route = "quiz"; store.nextQuestion(); render()
+                } else { ranked = store.hardReviewTasks(chosenPacks); refresh() }
+            }
+        }
+        dialog.show()
     }
 
     private data class DifficultWord(val word: Word, val skill: Skill, val progress: Progress)
@@ -2037,7 +2456,7 @@ class MainActivity : AppCompatActivity() {
         private var bound: DifficultWord? = null
         init {
             view.add(button("Повторить задание") {
-                bound?.let { startShort(false, listOf(Task(it.word.id, it.skill)), packReview = true) }
+                bound?.let { startShort(false, listOf(Task(it.word.id, it.skill)), packReview = true, selectedReview = true) }
             }, 10)
         }
 
@@ -2107,7 +2526,7 @@ class MainActivity : AppCompatActivity() {
             }
             account.add(button("Выйти из аккаунта") {
                 MaterialAlertDialogBuilder(this).setTitle("Выйти из аккаунта?")
-                    .setMessage("Наборы и прогресс останутся на устройстве. Доступ к синхронизации сохранится для этого аккаунта; повторно вводить пароль доступа не потребуется.")
+                    .setMessage("Наборы, тексты и прогресс останутся на устройстве. Доступ к синхронизации сохранится для этого аккаунта; повторно вводить пароль доступа не потребуется.")
                     .setPositiveButton("Выйти") { _, _ -> auth.signOut() }.setNegativeButton("Отмена", null).show()
             }, 8)
         }
@@ -2167,7 +2586,7 @@ class MainActivity : AppCompatActivity() {
         optionsColumn.add(about, 16)
         val privacy = card()
         privacy.add(label("Ваши данные", 21f, ink, true))
-        privacy.add(label("Слова, синонимы и результаты сохраняются на устройстве. Учётная запись необязательна. После подтверждения почты и включения синхронизации наборы и прогресс также хранятся в Google Firebase и доступны на ваших устройствах под тем же аккаунтом. Разные аккаунты имеют отдельные локальные библиотеки. При удалении приложения неотправленные данные могут быть потеряны. Экспорт JSON сохраняет словарь; результаты в него не входят. Разрешение на синхронизацию не переносится на другие устройства через резервную копию Android.\n\nПри использовании Hanping выбранное слово передаётся этому приложению. Системный голос может использовать интернет, если выбран сетевой голос.", 14f, muted), 12)
+        privacy.add(label("Слова, синонимы, тексты и результаты сохраняются на устройстве. Учётная запись необязательна. После подтверждения почты и включения синхронизации наборы, тексты и прогресс также хранятся в Google Firebase и доступны на ваших устройствах под тем же аккаунтом. Разные аккаунты имеют отдельные локальные библиотеки. При удалении приложения неотправленные данные могут быть потеряны. Экспорт JSON сохраняет словарь; результаты в него не входят. Разрешение на синхронизацию не переносится на другие устройства через резервную копию Android.\n\nПри использовании Hanping выбранное слово передаётся этому приложению. Системный голос может использовать интернет, если выбран сетевой голос.", 14f, muted), 12)
         accountColumn.add(privacy, 16)
     }
 
@@ -2342,20 +2761,51 @@ class MainActivity : AppCompatActivity() {
         layout.addView(input); parent.add(layout, 14)
         return input
     }
-    private fun editWord(original: Word?) {
+    private fun searchField(hint: String, initial: String, parent: LinearLayout): TextInputEditText {
+        val input = field(hint, initial, parent)
+        val layout = parent.getChildAt(parent.childCount - 1) as TextInputLayout
+        input.setSingleLine(true)
+        input.imeOptions = EditorInfo.IME_ACTION_SEARCH
+        input.setSelection(input.length())
+
+        // Keep the clear icon in the search field without changing the editor's measurement.
+        input.setPaddingRelative(input.paddingStart, input.paddingTop, dp(54), input.paddingBottom)
+        val clear = listIcon(R.drawable.ic_close, "Очистить поиск") {
+            input.requestFocus()
+            input.text?.clear()
+        }
+        val outer = layout.layoutParams
+        parent.removeView(layout)
+        parent.addView(FrameLayout(this).apply {
+            addView(layout, FrameLayout.LayoutParams(-1, -2))
+            addView(clear, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.END or Gravity.CENTER_VERTICAL))
+        }, outer)
+
+        fun updateClearVisibility() { clear.visibility = if (input.text.isNullOrEmpty()) View.INVISIBLE else View.VISIBLE }
+        input.doAfterTextChanged { updateClearVisibility() }
+        updateClearVisibility()
+        return input
+    }
+
+    private fun editWord(
+        original: Word?, initialHanzi: String = "", initialExample: String = "",
+        prefill: WordDraft? = null, saveToPack: ((Word, () -> Unit) -> Unit)? = null
+    ): AlertDialog {
         val form = column().apply { setPadding(dp(22), dp(8), dp(22), dp(16)) }
-        val hanzi = field("Иероглифы", original?.hanzi ?: "", form)
-        val pinyin = field("Пиньинь с диакритикой", original?.pinyin ?: "", form)
-        val numbered = field("Пиньинь с цифрами · ni3 hao3", original?.numbered ?: "", form)
-        val meanings = field("Переводы / синонимы · через ;", original?.meanings?.joinToString("; ") ?: "", form)
-        val distractors = field("Похожие неверные знаки · через ;", original?.distractors?.joinToString("; ") ?: "", form)
-        val alternatives = field("Другие формы слова / радикала · через ;", original?.alternatives?.joinToString("; ") ?: "", form)
+        val hanzi = field("Иероглифы", original?.hanzi ?: initialHanzi, form)
+        val pinyin = field("Пиньинь с диакритикой", original?.pinyin ?: prefill?.pinyin.orEmpty(), form)
+        val numbered = field("Пиньинь с цифрами · ni3 hao3", original?.numbered ?: prefill?.numbered.orEmpty(), form)
+        val meanings = field("Переводы / синонимы · через ;", original?.meanings?.joinToString("; ") ?: prefill?.meaning.orEmpty(), form)
+        val distractors = field("Похожие неверные знаки · через ;", original?.distractors?.joinToString("; ") ?: prefill?.distractors.orEmpty().joinToString("; "), form)
+        val alternatives = field("Другие формы слова / радикала · через ;", original?.alternatives?.joinToString("; ") ?: prefill?.alternatives.orEmpty().joinToString("; "), form)
         form.add(label("Например, для радикала 水 можно указать 氵. Добавляйте только формы, допустимые именно для этой карточки: они будут приниматься в ответах и показываться при проверке письма.", 13f, muted), 6)
-        val hint = field("Пояснение к слову или примеру", original?.hint ?: "", form)
-        val example = field("Пример на китайском (необязательно)", original?.example ?: "", form)
+        val hint = field("Пояснение к слову или примеру", original?.hint ?: prefill?.hint.orEmpty(), form)
+        val example = field("Пример на китайском (необязательно)", original?.example ?: initialExample, form)
         val examplePinyin = field("Пиньинь примера", original?.examplePinyin ?: "", form)
         val exampleTranslation = field("Перевод примера на русский", original?.exampleTranslation ?: "", form)
-        form.add(label("Не менее 3 неверных вариантов. Изменение карточки сбрасывает её учебный прогресс.", 13f, muted), 12)
+        if (initialExample.isNotBlank()) form.add(label("Для примера заполните пиньинь и перевод предложения.", 13f, muted), 6)
+        form.add(label(if (original == null) "Не менее 3 неверных вариантов."
+            else "Не менее 3 неверных вариантов. Изменение карточки сбрасывает её учебный прогресс.", 13f, muted), 12)
         val scroll = ScrollView(this).apply { addView(form) }
         val dialog = MaterialAlertDialogBuilder(this).setTitle(if (original == null) "Новое слово" else "Изменить слово")
             .setView(scroll).setPositiveButton("Сохранить", null).setNegativeButton("Отмена", null)
@@ -2367,9 +2817,15 @@ class MainActivity : AppCompatActivity() {
                     fun parts(input: TextInputEditText) = input.text.toString().split(';').map { it.trim() }.filter { it.isNotBlank() }
                     val word = Word(original?.id ?: UUID.randomUUID().toString(), hanzi.text.toString().trim(), pinyin.text.toString().trim(), numbered.text.toString().trim(), parts(meanings), parts(distractors), hint.text.toString().trim(), parts(alternatives), example.text.toString().trim(), examplePinyin.text.toString().trim(), exampleTranslation.text.toString().trim())
                     StudyStore.validate(word)
-                    require(store.words.none { it.id != word.id && it.hanzi == word.hanzi }) { "Это слово уже есть. Измените существующую карточку." }
-                    store.replaceWord(word); shown.dismiss(); render()
-                } catch (e: Exception) { message("Проверьте карточку", e.message ?: "Неверные данные") }
+                    if (saveToPack != null) saveToPack(word, shown::dismiss)
+                    else {
+                        require(store.words.none { it.id != word.id && it.hanzi == word.hanzi }) { "Это слово уже есть. Измените существующую карточку." }
+                        store.replaceWord(word); shown.dismiss(); render()
+                    }
+                } catch (e: Exception) {
+                    if (saveToPack == null) message("Проверьте карточку", e.message ?: "Неверные данные")
+                    else toast(e.message ?: "Проверьте карточку")
+                }
             }
             if (original != null) shown.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
                 MaterialAlertDialogBuilder(this).setTitle("Удалить ${original.hanzi}?").setMessage("Карточка и её статистика будут удалены.")
@@ -2381,6 +2837,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         shown.show()
+        return shown
     }
     private fun useDeviceVoice(word: Word) {
         voice.stop()
@@ -2394,8 +2851,70 @@ class MainActivity : AppCompatActivity() {
         val error = voice.play(word, store.audioProvider, store.slowAudio)
         if (error != null) { audioNotice?.text = error; message("Звук недоступен", "$error\n\nАудирование можно временно выключить на вкладке «Настройки».") }
     }
+    private fun wordDetails(word: Word): BottomSheetDialog {
+        val source = if (word.example.isBlank()) starterExamples[SharedWords.identity(word)] ?: word else word
+        return WordDetailsSheet.show(this, word.copy(example = source.example, examplePinyin = source.examplePinyin,
+            exampleTranslation = source.exampleTranslation), store.vocabularyLookup().memberships(word),
+            ::play, ::dictionary, { vocabularySearch(it) })
+    }
+
+    private fun reader(): ReaderDialogs {
+        readerDialogs?.close()
+        return ReaderDialogs(this, store, { word ->
+            voice.play(word, store.audioProvider, store.slowAudio)?.let(::toast)
+        }, { sentence -> voice.playText(sentence, store.slowAudio)?.let(::toast) },
+            voice::stop, ::strokeOrder, { selection, prefill, save ->
+            editWord(null, selection.quote, selection.sentence, prefill, save)
+        }, ::render).also { readerDialogs = it }
+    }
+
+    private fun vocabularySearch(initial: String = "", source: OfflineDictionary.Source? = null) {
+        createDictionaryScreen().show(initial, source)
+    }
+
+    private fun createDictionaryScreen(): DictionaryScreen {
+        val owner = store
+        val page = DictionaryScreen(this, owner.dictionaryBookmarks, owner::vocabularyLookup,
+            { value, parent -> searchField("Слово или перевод", value, parent) },
+            ::wordDetails, { word -> voice.play(word, owner.audioProvider, owner.slowAudio)?.let(::toast) },
+            { form, entry, meaning, track, saved -> addDictionaryWord(owner, form, entry, meaning, track, saved) },
+            { dictionaryScreens.remove(it) })
+        dictionaryScreens.add(page)
+        return page
+    }
+
+    private fun addDictionaryWord(
+        owner: StudyStore, form: String, entry: OfflineDictionary.Entry, meaning: String,
+        track: (android.app.Dialog) -> Unit, saved: () -> Unit
+    ) {
+        val packs = owner.packNames
+        val labels = packs.map { (id, name) -> owner.packLabel(id, name) }
+        track(MaterialAlertDialogBuilder(this).setTitle("Выберите набор")
+            .setItems(labels.toTypedArray()) { _, index ->
+                val id = packs[index].first
+                val name = labels[index]
+                val alternatives = listOf(entry.simplified, entry.traditional).distinct().filter { it != form }
+                try {
+                    val words = owner.packWords(id)
+                    val draft = WordDraft(Pinyin.marked(entry.pinyin), entry.pinyin, meaning, alternatives,
+                        StudyStore.suggestDistractors(form, alternatives, words.map { it.hanzi }),
+                        OfflineDictionary.wiktionaryCredit(entry.article))
+                    track(editWord(null, initialHanzi = form, prefill = draft) { word, dismissEditor ->
+                        check(store === owner) { "Профиль изменился. Откройте словарь заново." }
+                        val identity = SharedWords.identity(word)
+                        val duplicate = owner.packWords(id).any { SharedWords.identity(it) == identity }
+                        if (!duplicate) owner.addWordToPack(id, word)
+                        dismissEditor()
+                        saved()
+                        if (!duplicate) render()
+                        toast(if (duplicate) "Карточка уже есть · $name" else "Слово добавлено · $name")
+                    })
+                } catch (error: Exception) { toast(error.message ?: "Не удалось открыть набор.") }
+            }.setNegativeButton("Отмена", null).show())
+    }
+
     private fun dictionary(word: Word) {
-        MaterialAlertDialogBuilder(this).setTitle("Открыть ${word.hanzi}").setItems(arrayOf("Pleco", "Hanping")) { _, which -> voice.lookup(word, which == 0)?.let { toast(it) } }.show()
+        MaterialAlertDialogBuilder(this).setTitle("Открыть ${word.hanzi}").setItems(arrayOf("Pleco", "Hanping")) { _, which -> ExternalDictionary(this).lookup(word.hanzi, which == 0)?.let { toast(it) } }.show()
     }
     private fun strokeOrder(word: Word) {
         voice.stop()

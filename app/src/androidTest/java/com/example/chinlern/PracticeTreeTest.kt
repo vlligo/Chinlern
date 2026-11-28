@@ -13,7 +13,7 @@ import org.junit.Test
 class PracticeTreeTest {
     @Test fun foldersExpandIndependentlyAndCollapsingPreservesDraftSelection() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit()
+        com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit()
         val data = StudyStore(context)
         val original = data.activePackId
         data.importPack("Lesson one", listOf(data.words.first()))

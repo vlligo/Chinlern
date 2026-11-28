@@ -1,6 +1,10 @@
 package com.example.chinlern
 
 import android.content.Context
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
+import android.view.ViewGroup
+import android.widget.LinearLayout
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.core.app.ActivityScenario
@@ -12,7 +16,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class StudyActivityStoreTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
-    @Before fun reset() { context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit() }
+    @Before fun reset() { com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit() }
     private fun summary(store: StudyStore) = store.activitySummary()
 
     @Test fun answersPersistAndUndoRemovesActivityAfterReload() {
@@ -59,13 +63,42 @@ class StudyActivityStoreTest {
                 val allTime = descendants(root).filterIsInstance<android.widget.TextView>().first { it.text == "За всё время · вся библиотека" }
                 val today = StudyActivity.date(System.currentTimeMillis())
                 val cell = calendar.findViewWithTag<android.widget.TextView>(today)
-                cell.performClick()
                 val details = calendar.findViewWithTag<android.widget.TextView>("activity-day-details")
+                val config = activity.resources.configuration
+                val tablet = config.screenWidthDp >= 600
+                val dayHeight = ((if (tablet) 48 else 40) * activity.resources.displayMetrics.density).toInt()
+                assertEquals(dayHeight, cell.layoutParams.height)
+                val dayRow = cell.parent as LinearLayout
+                val month = dayRow.parent as ViewGroup
+                assertEquals(tablet, month.indexOfChild(dayRow) < month.indexOfChild(details))
+                if (config.screenWidthDp >= 1000 && config.fontScale <= 1.3f) {
+                    assertEquals(LinearLayout.HORIZONTAL, (parent as LinearLayout).orientation)
+                    assertTrue(allTime in descendants(parent))
+                }
+                fun dayFill() = (cell.background.current as GradientDrawable).color?.defaultColor
+                val restingFill = dayFill()
+                cell.isPressed = true
+                assertNotEquals(restingFill, dayFill())
+                cell.isPressed = false
+                assertEquals(restingFill, dayFill())
+                cell.performClick()
                 assertTrue(details.text.toString().contains("Ответов: 1 · Верно: 1 · 100%"))
                 assertTrue(cell.isSelected)
+                fun monthArrow(description: String) = descendants(calendar).filterIsInstance<android.widget.ImageButton>()
+                    .single { it.contentDescription == description }
+                val arrow = monthArrow("Предыдущий месяц")
+                assertFalse(arrow.background is RippleDrawable)
+                arrow.isPressed = true
+                arrow.jumpDrawablesToCurrentState()
+                assertEquals(0.9f, arrow.scaleX, 0.001f)
+                assertEquals(0.9f, arrow.scaleY, 0.001f)
+                arrow.isPressed = false
+                arrow.jumpDrawablesToCurrentState()
+                assertEquals(1f, arrow.scaleX, 0.001f)
+                assertEquals(1f, arrow.scaleY, 0.001f)
                 val timings = mutableListOf<Long>()
                 repeat(12) {
-                    val previous = descendants(calendar).filterIsInstance<android.widget.TextView>().first { it.text == "← Предыдущий месяц" }
+                    val previous = monthArrow("Предыдущий месяц")
                     val started = android.os.SystemClock.elapsedRealtimeNanos()
                     previous.performClick()
                     timings += (android.os.SystemClock.elapsedRealtimeNanos() - started) / 1_000_000
@@ -76,10 +109,12 @@ class StudyActivityStoreTest {
                     val firstDay = descendants(calendar).filterIsInstance<android.widget.TextView>().first { (it.tag as? String)?.endsWith("-01") == true }
                     firstDay.performClick()
                     assertTrue(calendar.findViewWithTag<android.widget.TextView>("activity-day-details").text.contains("занятий не было"))
-                    descendants(calendar).filterIsInstance<android.widget.TextView>().first { it.text == "Следующий месяц →" }.performClick()
+                    val next = monthArrow("Следующий месяц")
+                    assertTrue(next.isEnabled)
+                    next.performClick()
                 }
                 android.util.Log.i("CalendarPerformance", "Month update median: ${timings.sorted()[timings.size / 2]} ms; max: ${timings.max()} ms")
-                assertFalse(descendants(calendar).filterIsInstance<android.widget.TextView>().first { it.text == "Следующий месяц →" }.isEnabled)
+                assertFalse(monthArrow("Следующий месяц").isEnabled)
             }
         }
     }

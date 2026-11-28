@@ -16,9 +16,9 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class PackFlowTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
-    @Before fun reset() { context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit() }
+    @Before fun reset() { com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit() }
     @Test fun oldLibraryMigratesWithoutLosingProgress() {
-        val prefs = context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE)
+        val prefs = com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1")
         prefs.edit().putString("words", StudyStore.seedJson).putStringSet("selected", setOf("water"))
             .putString("progress", """{"water:CHARACTER_MEANING":{"attempts":3,"errors":1,"mastered":true}}""").commit()
         val store = StudyStore(context)

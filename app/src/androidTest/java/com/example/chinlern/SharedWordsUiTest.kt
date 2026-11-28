@@ -13,22 +13,22 @@ import org.junit.Test
 class SharedWordsUiTest {
     @Test fun knowledgeCheckboxUpdatesTheOtherCardWhileStudySelectionRemainsSeparate() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        context.getSharedPreferences("chinlearn_v1", Context.MODE_PRIVATE).edit().clear().commit()
+        com.example.chinlern.data.ProfileStorage.open(context, "chinlearn_v1").edit().clear().commit()
         val store = StudyStore(context)
         val word = store.words.first()
         store.importPack("Second", listOf(word.copy(id = "copy")))
         store.choosePracticePacks(store.packNames.map { it.first }.toSet())
         store.route = "words"; store.save()
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            onView(withHint("Найти слово, пиньинь или перевод")).perform(scrollToLibraryControl(), replaceText("Second"), closeSoftKeyboard())
+            filterLibraryCards("Second")
             onView(withContentDescription("Умею писать: 水 · Second")).perform(scrollToLibraryControl(), click())
-            onView(withHint("Найти слово, пиньинь или перевод")).perform(scrollToLibraryControl(), replaceText("Мои слова 水"), closeSoftKeyboard())
+            filterLibraryCards("Мои слова 水")
             onView(withContentDescription("Умею писать: 水 · Мои слова")).perform(scrollToLibraryControl()).check(matches(isChecked()))
             onView(withContentDescription("Учить 水 · Мои слова")).perform(scrollToLibraryControl(), click())
             assertEquals(16, StudyStore(context).studyWords.size)
             assertFalse(StudyStore(context).libraryPacks().first { it.name == "Мои слова" }.selected.contains(word.id))
             scenario.recreate()
-            onView(withHint("Найти слово, пиньинь или перевод")).perform(scrollToLibraryControl(), replaceText("Second"), closeSoftKeyboard())
+            filterLibraryCards("Second")
             onView(withContentDescription("Умею писать: 水 · Second")).perform(scrollToLibraryControl()).check(matches(isChecked()))
             scenario.onActivity { activity ->
                 val view = activity.window.decorView

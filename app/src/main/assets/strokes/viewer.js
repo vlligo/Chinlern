@@ -7,13 +7,20 @@
   let writer = null, generation = 0, ready = false, step = 0, total = 0;
   let running = false, paused = false, busy = false, cleared = false;
   let pendingSteps = 0;
+  let strokePaths = [], restoredSteps = 0;
   let showGuides = false, medians = [], activeGuide = null;
+  const characterLayer = el('character-layer');
+  const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
+  let characterExit = null;
   function controls() {
     el('play').disabled = !ready || (busy && !running && !paused);
+    el('previous').disabled = !ready || (busy ? step === 0 : step <= 1);
     el('next').disabled = !ready;
-    el('next').textContent = pendingSteps ? 'Дальше…' : step >= total ? 'К первой черте' : 'Следующая черта';
-    el('replay').disabled = !ready;
-    el('play').textContent = paused ? '▶ Продолжить' : running ? 'Ⅱ Пауза' : step === total && total ? '↻ Повторить' : '▶ Смотреть';
+    el('next').setAttribute('aria-label', step >= total && total ? 'К первой черте' : 'Следующая черта');
+    const playback = paused ? ['▶', 'Продолжить'] : running ? ['Ⅱ', 'Пауза'] :
+      step === total && total ? ['↻', 'Повторить'] : ['▶', 'Смотреть'];
+    el('play').textContent = playback[0];
+    el('play').setAttribute('aria-label', playback[1]);
     el('slow').setAttribute('aria-pressed', String(slow));
     el('show-guides').disabled = !ready;
     el('show-guides').setAttribute('aria-pressed', String(showGuides));
@@ -28,6 +35,16 @@
     Object.entries(attributes).forEach(([key, value]) => node.setAttribute(key, String(value)));
     parent.append(node);
     return node;
+  }
+  function drawCompletedStrokes() {
+    const svg = el('completed-strokes');
+    svg.replaceChildren();
+    if (!restoredSteps) return;
+    const size = dimensions();
+    const {x, y, scale} = HanziWriter.getScalingTransform(size, size, 18);
+    svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
+    const group = svgNode('g', {transform: `translate(${x} ${size - y}) scale(${scale} ${-scale})`}, svg);
+    strokePaths.slice(0, restoredSteps).forEach(path => svgNode('path', {d: path}, group));
   }
   function drawGuides() {
     const svg = el('guides');
@@ -86,7 +103,17 @@
     });
   }
   function progress() { el('status').textContent = step ? 'Черта ' + step + ' из ' + total : 'Всего черт: ' + total; }
-  function unavailable(message) {
+  function revealCharacter(direction) {
+    characterLayer.getAnimations().forEach(animation => animation.cancel());
+    characterExit = null;
+    if (direction && !motionPreference.matches) {
+      characterLayer.animate([
+        {opacity: 0, transform: `translateX(${direction * 24}px)`},
+        {opacity: 1, transform: 'translateX(0)'}
+      ], {duration: 160, easing: 'cubic-bezier(0.2, 0, 0, 1)'});
+    }
+  }
+  function unavailable(message, direction) {
     ready = false;
     drawGuides();
     el('target').className = 'fallback';
@@ -95,40 +122,58 @@
     el('unavailable').textContent = message;
     el('status').textContent = 'Анимация недоступна';
     controls();
+    revealCharacter(direction);
   }
-  async function select(index, autoplay, firstStroke = false) {
+  async function select(index) {
     const token = ++generation;
-    if (writer) writer.hideCharacter({duration: 0});
-    writer = null; ready = running = paused = busy = cleared = false; step = total = 0;
+    const direction = Math.sign(index - selected);
+    const animate = direction && el('target').hasChildNodes() && !motionPreference.matches;
+    if (animate && !characterExit) {
+      const {opacity, transform} = getComputedStyle(characterLayer);
+      characterLayer.getAnimations().forEach(animation => animation.cancel());
+      characterExit = characterLayer.animate([
+        {opacity, transform},
+        {opacity: 0, transform: `translateX(${-direction * 24}px)`}
+      ], {duration: 90, easing: 'ease-in', fill: 'forwards'});
+    }
+    if (characterExit && writer) writer.pauseAnimation();
+    ready = running = paused = busy = cleared = false; step = total = 0;
     pendingSteps = 0;
-    medians = []; activeGuide = null; drawGuides();
     selected = index;
     remember(); controls();
-    el('target').replaceChildren(); el('target').className = '';
-    el('unavailable').hidden = true;
     el('status').textContent = 'Загрузка…';
     document.querySelectorAll('.chip').forEach((chip, i) => chip.setAttribute('aria-pressed', String(i === selected)));
     const entry = characters[selected];
-    if (!entry) { el('position').textContent = ''; unavailable('В этом слове нет знаков для просмотра.'); return; }
-    el('position').textContent = entry.char + ' · знак ' + entry.position + ' из ' + entry.count;
-    el('swipe-hint').hidden = entry.count < 2;
-    el('target').setAttribute('aria-label', 'Порядок черт: ' + entry.char);
+    el('position').textContent = entry ? entry.char + ' · знак ' + entry.position + ' из ' + entry.count : '';
+    if (characterExit) {
+      await characterExit.finished.catch(() => {});
+      if (token !== generation) return;
+    }
+    if (writer) writer.hideCharacter({duration: 0});
+    writer = null;
+    strokePaths = []; restoredSteps = 0; drawCompletedStrokes();
+    medians = []; activeGuide = null; drawGuides();
+    el('target').replaceChildren(); el('target').className = '';
+    el('unavailable').hidden = true;
+    el('target').setAttribute('aria-label', entry ? 'Порядок черт: ' + entry.char : '');
+    if (!entry) { unavailable('В этом слове нет знаков для просмотра.', direction); return; }
     try {
       let data = cache.get(entry.char);
       if (!data) {
         const response = await fetch('data/' + entry.char.codePointAt(0).toString(16) + '.json');
         if (token !== generation) return;
-        if (!response.ok) { unavailable('Для этого знака пока нет данных о порядке черт.'); return; }
+        if (!response.ok) { unavailable('Для этого знака пока нет данных о порядке черт.', direction); return; }
         data = await response.json();
         if (token !== generation) return;
         cache.set(entry.char, data);
       }
       if (!Array.isArray(data.strokes) || !data.strokes.length) throw new Error('Missing strokes');
       medians = data.medians;
-      total = data.strokes.length;
+      strokePaths = data.strokes;
+      total = strokePaths.length;
       writer = HanziWriter.create('target', entry.char, {
         width: dimensions(), height: dimensions(), padding: 18,
-        showCharacter: true, showOutline: true, strokeColor: '#244b44', outlineColor: '#e3e7dd',
+        showCharacter: true, showOutline: true, strokeColor: '#2b302b', outlineColor: '#e7e0d1',
         strokeAnimationSpeed: slow ? 0.45 : 1, strokeFadeDuration: 0,
         charDataLoader: () => data,
         onLoadCharDataSuccess: () => {
@@ -136,14 +181,13 @@
           setTimeout(() => {
             if (token !== generation) return;
             ready = true; progress(); controls(); drawGuides();
-            if (autoplay) play();
-            else if (firstStroke) one(token);
+            revealCharacter(direction);
           }, 0);
         },
-        onLoadCharDataError: () => { if (token === generation) unavailable('Не удалось загрузить черты. Выберите знак снова.'); }
+        onLoadCharDataError: () => { if (token === generation) unavailable('Не удалось загрузить черты. Выберите знак снова.', direction); }
       });
     } catch (_) {
-      if (token === generation) unavailable('Не удалось загрузить черты. Выберите знак снова.');
+      if (token === generation) unavailable('Не удалось загрузить черты. Выберите знак снова.', direction);
     }
   }
   async function one(token) {
@@ -162,13 +206,23 @@
       await one(token);
     }
   }
+  function rewindTo(position) {
+    // Rebuild the completed prefix immediately, even if the animation was paused.
+    const token = ++generation;
+    running = paused = busy = cleared = false;
+    pendingSteps = 0;
+    restoredSteps = step = position;
+    activeGuide = step ? step - 1 : null;
+    writer.hideCharacter({duration: 0});
+    drawCompletedStrokes(); drawGuides(); progress(); controls();
+    return token;
+  }
   async function play() {
     if (!ready) return;
     if (running) { pause(); return; }
     if (paused) { paused = false; running = true; writer.resumeAnimation(); controls(); return; }
     if (busy) return;
-    if (step >= total) { select(selected, true); return; }
-    const token = generation;
+    const token = step >= total ? rewindTo(0) : generation;
     running = true; controls();
     while (running && step < total && token === generation) await one(token);
     if (token === generation && !paused) { running = false; controls(); }
@@ -186,18 +240,22 @@
     if (busy) {
       pendingSteps = Math.min(pendingSteps + 1, Math.max(0, total - step - 1));
       controls();
-    } else if (step >= total) select(selected, false, true);
-    else one(generation);
+    } else one(step >= total ? rewindTo(0) : generation);
+  }
+  function previousStroke() {
+    const previous = busy ? step : step - 1;
+    if (ready && previous >= 1) rewindTo(previous);
   }
   el('play').addEventListener('click', play);
+  el('previous').addEventListener('click', previousStroke);
   el('next').addEventListener('click', nextStroke);
-  el('replay').addEventListener('click', () => select(selected, true));
-  el('slow').addEventListener('click', () => { slow = !slow; select(selected, false); });
+  el('slow').addEventListener('click', () => { slow = !slow; select(selected); });
   el('show-guides').addEventListener('click', () => {
     showGuides = !showGuides; remember(); controls(); drawGuides();
   });
   function resizeWriter() {
     if (writer) writer.updateDimensions({width: dimensions(), height: dimensions(), padding: 18});
+    drawCompletedStrokes();
     drawGuides();
   }
   // The drawing can resize independently of the window (split screen, sidebar,
@@ -226,7 +284,7 @@
     if (!entry) return;
     // Stay within the selected written form, including at the first/last sign.
     const next = selected + (dx < 0 ? 1 : -1);
-    if (characters[next] && characters[next].form === entry.form) select(next, false);
+    if (characters[next] && characters[next].form === entry.form) select(next);
   }, true);
   document.addEventListener('click', event => {
     if (!suppressSwipeClick || event.detail === 0) return;
@@ -269,13 +327,13 @@
           characters.push({char, position: position + 1, count: chars.length, form: formIndex});
           const button = document.createElement('button'); button.className = 'chip'; button.textContent = char;
           button.setAttribute('aria-label', char + ', знак ' + (position + 1) + ' из ' + chars.length);
-          button.addEventListener('click', () => select(index, false));
+          button.addEventListener('click', () => select(index));
           chips.append(button);
         });
         group.append(chips); el('characters').append(group);
       });
       const index = Number(state.get('i'));
-      select(Number.isInteger(index) && index >= 0 && index < characters.length ? index : 0, false);
+      select(Number.isInteger(index) && index >= 0 && index < characters.length ? index : 0);
     }
   };
 }());
